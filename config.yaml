@@ -1,0 +1,7 @@
+default_orch_model: "gemma4:31b-cloud"
+
+high_coding_model: "qwen3-coder:480b-cloud"
+medium_coding_model: "qwen3-coder-next:cloud"
+low_coding_model: "devstral-2:123b-cloud"
+
+default_opt_model: "minimax-m2.5:cloud"
