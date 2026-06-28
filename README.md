@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="Harness Logo" width="300">
+  <img src="logo.png" alt="Harness Logo" width="600">
 </p>
 
 <h1 align="center">Harness</h1>
