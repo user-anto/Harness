@@ -1,1 +1,8 @@
 .venv
+my*
+.env
+__pycache__
+llama-server.log
+code_graph.py
+execution_traces/
+DFD_lvl1

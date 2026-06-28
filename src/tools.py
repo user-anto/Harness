@@ -2,6 +2,9 @@ import os
 import subprocess
 import urllib.request
 from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import SystemMessage
+from llm import search_llm
 from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_tavily import TavilySearch
 from dotenv import load_dotenv
@@ -81,8 +84,15 @@ def read_file(path: str) -> str:
 
 @tool
 def write_file(path: str, content: str) -> str:
-    """Write content to a local file."""
+    """Write content to a local file.
+    If creating a new file, place it in the 'workspace/' directory by default unless the user explicitly requests it in the current directory."""
+    ans = input(f"\n\033[93mPermission to execute write_file on {path}? (Y/n): \033[0m")
+    if ans.strip().lower() not in ['', 'y', 'yes']:
+        return "Execution aborted by user."
     try:
+        dir_name = os.path.dirname(os.path.abspath(path))
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         return f"Successfully wrote to {path}"
@@ -109,6 +119,9 @@ def search_code(directory: str, query: str) -> str:
 @tool
 def run_cmd(cmd: str, cwd: str = ".") -> str:
     """Run a shell command."""
+    ans = input(f"\n\033[93mPermission to execute command '{cmd}' in cwd '{cwd}'? (Y/n): \033[0m")
+    if ans.strip().lower() not in ['', 'y', 'yes']:
+        return "Execution aborted by user."
     try:
         result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
         out = result.stdout + "\n" + result.stderr
@@ -144,9 +157,27 @@ def fetch_url(url: str) -> str:
     except Exception as e:
         return f"Error fetching URL: {str(e)}"
 
-tools = [
+search_tools = [
     duckduckgo_search,
-    tavily_search,
+    tavily_search
+]
+
+search_agent = create_react_agent(
+    search_llm,
+    tools=search_tools,
+    prompt=SystemMessage(
+        content="You are a precise web search assistant. Your job is to search the web and return the exact information requested without any conversational filler or meta-commentary."
+    )
+)
+
+@tool
+def perform_web_search(query: str) -> str:
+    """Perform a web search to gather information to answer a query."""
+    print("\033[90m\033[3mSearching the web...\033[0m")
+    result = search_agent.invoke({"messages": [("user", query)]})
+    return result["messages"][-1].content
+
+tools = [
     long_int_multiply, 
     read_file,
     write_file,
@@ -155,5 +186,6 @@ tools = [
     run_cmd, 
     git_status,
     git_diff,
-    fetch_url
+    fetch_url,
+    perform_web_search
 ]

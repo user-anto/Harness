@@ -25,7 +25,7 @@ def get_large_text_lines():
         combined.append(f"{line}\033[38;2;255;255;255m{dl.ljust(d_max)}\033[0m")
     return combined, h_max + d_max
 
-def render_terminal_ui(image_path="/home/ranta_unix/projects/Harness/together.png", total_width=110):
+def render_terminal_ui(image_path="/home/ranta_unix/projects/Harness/logo.png", total_width=110):
     try:
         img = Image.open(image_path).convert('RGB')
     except Exception as e:

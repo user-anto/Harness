@@ -1,7 +1,4 @@
-default_orch_model: "gemma4:31b-cloud"
-
-high_coding_model: "qwen3-coder:480b-cloud"
-medium_coding_model: "qwen3-coder-next:cloud"
-low_coding_model: "devstral-2:123b-cloud"
-
-default_opt_model: "minimax-m2.5:cloud"
+default_orch_model: "~/models/gemma-4/e4b-it.gguf"
+default_search_model: "llama3.2:3b"
+default_guard_model: "shieldgemma:2b"
+default_opt_model: "minimax-m3:cloud"
