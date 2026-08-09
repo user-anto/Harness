@@ -25,7 +25,7 @@ class AuditLogger:
         with open(self.log_file, "a") as f:
             f.write(f"--- Audit Log Started: {timestamp} ---\n")
 
-    def _log_event(self, event_type: str, content: str):
+    def _log_event(self, event_type: str, content: str) -> str:
         if not self.log_file:
             self.initialize()
             
@@ -37,9 +37,10 @@ class AuditLogger:
         }
         with open(self.log_file, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
+        return timestamp
 
-    def log_prompt(self, prompt: str):
-        self._log_event("prompt", prompt)
+    def log_prompt(self, prompt: str) -> str:
+        return self._log_event("prompt", prompt)
 
     def log_reasoning(self, reasoning: str):
         self._log_event("reasoning", reasoning)
@@ -53,7 +54,7 @@ class AuditLogger:
     def log_error(self, error: str):
         self._log_event("error", error)
         
-    def log_final_response(self, response: str):
-        self._log_event("final-response", response)
+    def log_final_response(self, response: str) -> str:
+        return self._log_event("final-response", response)
 
 audit_logger = AuditLogger()

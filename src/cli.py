@@ -1,5 +1,8 @@
 from PIL import Image
 import pyfiglet
+import threading
+import sys
+import time
 
 ASCII_CHARS = " .:=-+*%@,/?'\"`~|()&^$"
 ansi = lambda r, g, b: f"\033[38;2;{r};{g};{b}m"
@@ -48,6 +51,7 @@ def render_terminal_ui(image_path="/home/ranta_unix/projects/Harness/logo.png", 
     text_start_y = (bh_height - len(text_lines)) // 2
 
     for y in range(bh_height):
+        time.sleep(0.04)
         line_chars = ""
 
         for x in range(bh_width):
@@ -69,6 +73,36 @@ def render_terminal_ui(image_path="/home/ranta_unix/projects/Harness/logo.png", 
         print(f"{white}│ {reset}{line_chars}{white} │{reset}")
 
     print(f"{white}╰{'─' * (total_width + 2)}╯{reset}")
+
+# Animated Spinner
+class Spinner:
+    def __init__(self, message="Digging through memory..."):
+        self.message = message
+        self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def _spin(self):
+        idx = 0
+        while not self.stop_event.is_set():
+            char = self.spinner_chars[idx % len(self.spinner_chars)]
+            sys.stdout.write(f"\r\033[90m{self.message} {char}\033[0m")
+            sys.stdout.flush()
+            idx += 1
+            time.sleep(0.08)
+
+    def __enter__(self):
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.daemon = True
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join()
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
 
 if __name__ == "__main__":
     render_terminal_ui()

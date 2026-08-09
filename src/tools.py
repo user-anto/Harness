@@ -2,76 +2,27 @@ import os
 import subprocess
 import urllib.request
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import SystemMessage
-from llm import search_llm
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_tavily import TavilySearch
 from dotenv import load_dotenv
+load_dotenv()  # Load environment variables before setting up clients
 
-load_dotenv()
-
-# 1. DuckDuckGo Search Tool
-ddg_tool = DuckDuckGoSearchRun(
-    name="duckduckgo_search",
-    description="DuckDuckGo",
-)
-
-# 2. Tavily Search Tool
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-
-tavily_tool = TavilySearch(
-    name="tavily_search",
-    description="Tavily-Search",
-    max_results=3,
-    search_depth="basic",
-    include_answer=True,
-    include_raw_content=False,
-    tavily_api_key=TAVILY_API_KEY
-)
+from llm import config
+import ollama
+from memory import retrieve_context
 
 @tool
-def duckduckgo_search(query: str) -> str:
-    """
-    Search DuckDuckGo for general web results.
-    """
-    return ddg_tool.run(query)
-
-@tool
-def tavily_search(query: str) -> str:
-    """
-    Search Tavily for high-quality, LLM-optimized web results.
-    """
-    if not TAVILY_API_KEY:
-        print("Warning: Tavily API Key not set. Defaulting to DuckDuckGo-Search.")
-        return ddg_tool.run(query)
-    return tavily_tool.run(query)
+def search_memory(query: str) -> str:
+    """Search the user's conversational memory history. 
+    CRITICAL: You MUST use this tool FIRST before performing any web searches to check if the topic has been discussed previously."""
+    with Spinner("Digging through memory..."):
+        result = retrieve_context(query)
+        if not result:
+            return "No relevant history found."
+        return result
 
 @tool
 def long_int_multiply(num1: str, num2: str) -> str:
-    """
-    Multiply two arbitrarily large integers passed as strings.
-    """
-    if num1 == "0" or num2 == "0":
-        return "0"
-
-    n1, n2 = len(num1), len(num2)
-    result = [0] * (n1 + n2)
-
-    for i in range(n1 - 1, -1, -1):
-        for j in range(n2 - 1, -1, -1):
-            mul = int(num1[i]) * int(num2[j])
-            p1, p2 = i + j, i + j + 1
-            total = mul + result[p2]
-
-            result[p2] = total % 10
-            result[p1] += total // 10
-
-    start = 0
-    while start < len(result) and result[start] == 0:
-        start += 1
-
-    return "".join(map(str, result[start:]))
+    """Multiply two arbitrarily large integers passed as strings."""
+    return str(int(num1) * int(num2))
 
 @tool
 def read_file(path: str) -> str:
@@ -85,10 +36,12 @@ def read_file(path: str) -> str:
 @tool
 def write_file(path: str, content: str) -> str:
     """Write content to a local file.
-    If creating a new file, place it in the 'workspace/' directory by default unless the user explicitly requests it in the current directory."""
-    ans = input(f"\n\033[93mPermission to execute write_file on {path}? (Y/n): \033[0m")
-    if ans.strip().lower() not in ['', 'y', 'yes']:
-        return "Execution aborted by user."
+    If creating a new file:
+        - place it in the 'workspace/' directory by default. (Use 'mkdir -p' command with the run_cmd tool to create the directory if needed.)
+        - unless the user explicitly requests it in a certain specified directory."""
+    abort = _ask_permission(f"\n\033[93mPermission to execute write_file on {path}? (Y/n, or provide feedback): \033[0m")
+    if abort:
+        return abort
     try:
         dir_name = os.path.dirname(os.path.abspath(path))
         if dir_name:
@@ -98,6 +51,16 @@ def write_file(path: str, content: str) -> str:
         return f"Successfully wrote to {path}"
     except Exception as e:
         return f"Error writing file: {str(e)}"
+
+def _ask_permission(prompt: str) -> str | None:
+    """Return None if allowed, else abort reason."""
+    ans = input(prompt).strip()
+    low = ans.lower()
+    if low in ("n", "no"):
+        return "Execution aborted by user."
+    if low not in ("", "y", "yes"):
+        return f"Execution aborted. User provided feedback: {ans}"
+    return None
 
 @tool
 def list_dir(path: str) -> str:
@@ -119,9 +82,9 @@ def search_code(directory: str, query: str) -> str:
 @tool
 def run_cmd(cmd: str, cwd: str = ".") -> str:
     """Run a shell command."""
-    ans = input(f"\n\033[93mPermission to execute command '{cmd}' in cwd '{cwd}'? (Y/n): \033[0m")
-    if ans.strip().lower() not in ['', 'y', 'yes']:
-        return "Execution aborted by user."
+    abort = _ask_permission(f"\n\033[93mPermission to execute command '{cmd}' in cwd '{cwd}'? (Y/n, or provide feedback): \033[0m")
+    if abort:
+        return abort
     try:
         result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
         out = result.stdout + "\n" + result.stderr
@@ -157,25 +120,78 @@ def fetch_url(url: str) -> str:
     except Exception as e:
         return f"Error fetching URL: {str(e)}"
 
-search_tools = [
-    duckduckgo_search,
-    tavily_search
-]
-
-search_agent = create_react_agent(
-    search_llm,
-    tools=search_tools,
-    prompt=SystemMessage(
-        content="You are a precise web search assistant. Your job is to search the web and return the exact information requested without any conversational filler or meta-commentary."
-    )
-)
+from cli import Spinner
 
 @tool
 def perform_web_search(query: str) -> str:
-    """Perform a web search to gather information to answer a query."""
-    print("\033[90m\033[3mSearching the web...\033[0m")
-    result = search_agent.invoke({"messages": [("user", query)]})
-    return result["messages"][-1].content
+    """Perform a web search to gather information. 
+    WARNING: You must call `search_memory` first before using this tool to ensure the information isn't already in the conversation history."""
+    api_key = os.getenv("OLLAMA_API_KEY")
+    if not api_key:
+        return "Error: OLLAMA_API_KEY is not set in the .env file. An API key from ollama.com is required for web search."
+
+    client = ollama.Client(
+        headers={'Authorization': f'Bearer {api_key}'}
+    )
+    
+    available_tools = {
+        'web_search': client.web_search,
+        'web_fetch': client.web_fetch
+    }
+    
+    messages = [
+        {'role': 'system', 'content': "You are a precise web search assistant. Your job is to search the web and return the exact information requested without any conversational filler or meta-commentary."},
+        {'role': 'user', 'content': query}
+    ]
+    
+    search_model = config.get("default_search_model", "llama3.2:3b")
+    
+    final_result = None
+    with Spinner("Searching the web..."):
+        while True:
+            try:
+                response = client.chat(
+                    model=search_model,
+                    messages=messages,
+                    tools=[client.web_search, client.web_fetch],
+                )
+            except Exception as e:
+                final_result = f"Error communicating with Ollama: {str(e)}"
+                break
+                
+            messages.append(response.message)
+            
+            if response.message.tool_calls:
+                for tool_call in response.message.tool_calls:
+                    function_to_call = available_tools.get(tool_call.function.name)
+                    if function_to_call:
+                        try:
+                            args = tool_call.function.arguments
+                            result = function_to_call(**args)
+                            truncated_result = str(result)[:8000]
+                            messages.append({
+                                'role': 'tool',
+                                'content': truncated_result,
+                                'tool_name': tool_call.function.name
+                            })
+                        except Exception as e:
+                            messages.append({
+                                'role': 'tool',
+                                'content': f"Error calling tool: {str(e)}",
+                                'tool_name': tool_call.function.name
+                            })
+                    else:
+                        messages.append({
+                            'role': 'tool',
+                            'content': f"Tool {tool_call.function.name} not found",
+                            'tool_name': tool_call.function.name
+                        })
+            else:
+                final_result = response.message.content
+                break
+
+    print("\033[90mSearched the web\033[0m")
+    return final_result
 
 tools = [
     long_int_multiply, 
@@ -187,5 +203,6 @@ tools = [
     git_status,
     git_diff,
     fetch_url,
-    perform_web_search
+    perform_web_search,
+    search_memory
 ]

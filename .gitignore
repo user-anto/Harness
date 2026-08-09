@@ -1,8 +1,15 @@
 .venv
 my*
 .env
+.claude/
 __pycache__
 llama-server.log
 code_graph.py
 execution_traces/
 DFD_lvl1
+reflection_engine
+skill_registry
+qdrant_db
+sys-arch.md
+graph_visualization.png
+ctx.md

@@ -10,6 +10,56 @@ Harness is a locally-hosted, agentic CLI framework built using LangGraph, LangCh
 
 ## Technical Features
 
+```mermaid
+graph TD
+    %% User Input Flow
+    User([User Input]) --> InputNode[Input Node]
+    
+    %% Guardrail Security
+    InputNode --> Guardrail{Guardrail Node}
+    Guardrail -- Injection Detected --> Reject[Reject Request & Log Error]
+    Guardrail -- Safe Input --> OrchNode[Orchestrator Node]
+    
+    %% Main LLM Engine
+    OrchNode -- "Streams Prompt & History" --> LLM[(Local llama-server)]
+    
+    %% Routing
+    OrchNode -- "Decides to Call Tool" --> ToolNode[Tool Node]
+    OrchNode -- "Streams Final Answer" --> ArchivalNode[Archival Node]
+    
+    %% Tool Execution Sub-Graph
+    ToolNode --> Tools{Available Tools}
+    
+    Tools -- "search_memory" --> MemSearch[Memory Search]
+    Tools -- "perform_web_search" --> WebSearch[Web Search Sub-Agent]
+    Tools -- "run_cmd, write_file, etc." --> SysTools[OS / File System]
+    
+    %% Data Stores & External Dependencies
+    MemSearch -- "Semantic Similarity" --> Qdrant[(Qdrant Vector DB)]
+    MemSearch -- "Dynamic Payload Fetch" --> Traces[(execution_traces JSONL)]
+    WebSearch -- "web_search & web_fetch" --> OllamaAPI[(Ollama API)]
+    
+    %% Tool Output Loop
+    ToolNode -- "Tool Execution Results" --> OrchNode
+    
+    %% Archival & Cleanup
+    ArchivalNode -- "1. Enforce Token Window\n2. Track Active\nConversation History" --> LangGraphState[(LangGraph State)]
+    ArchivalNode -- "Async Embed & Save" --> EmbedSave[Background Thread]
+    EmbedSave --> Qdrant
+    
+    %% Styling
+    classDef primary fill:#4A90E2,stroke:#333,stroke-width:2px,color:#fff;
+    classDef storage fill:#50E3C2,stroke:#333,stroke-width:2px,color:#000;
+    classDef security fill:#E94B3C,stroke:#333,stroke-width:2px,color:#fff;
+    classDef tool fill:#F5A623,stroke:#333,stroke-width:2px,color:#fff;
+    
+    class InputNode,OrchNode,ArchivalNode,ToolNode primary;
+    class LLM,Qdrant,Traces,LangGraphState,OllamaAPI storage;
+    class Guardrail,Reject security;
+    class Tools,MemSearch,WebSearch,SysTools tool;
+```
+<p align="center"><u><sub>System Architecture Diagram</sub></u></p>
+
 ### Local Model Orchestration and Lifecycle Management
 - **Automated Subprocess Control**: Harness automatically handles the startup and teardown of the local `llama-server`. It spawns a background subprocess utilizing GPU layer offloading (`-ngl 999`), a target context size (`--ctx-size 16384`), and binds to port `8000`.
 - **Pre-flight Port Checking**: Prior to startup, the framework checks if port `8000` is active via a connection check to `http://localhost:8000/v1/models`. If a server is active, it skips launch to prevent port collision.
@@ -20,34 +70,76 @@ Harness is a locally-hosted, agentic CLI framework built using LangGraph, LangCh
 - **Prompt Injection Defense**: Every raw user input is processed by a dedicated `guard_node` utilizing `guard_llm` (configured for ShieldGemma) before entering the orchestrator state graph. 
 - **Deterministic Routing**: If the guard model classifies the input as an injection attack, the graph aborts immediately and returns a rejection message, bypassing the main orchestration engine entirely.
 
+
+```mermaid
+graph TD
+    %% Full Memory Array
+    OlderChunks[Older Memory Chunks] -->|Query| TopK[Top-k Retrieval]
+    RecentChunks[Recent 96k Memory]
+    
+    %% Assembling the Context Window
+    TopK -->|Retrieved Context| ContextWindow[Context-Window]
+    RecentChunks -->|Prompt + Active Context| ContextWindow
+    
+    %% Core Processing
+    ContextWindow --> LLM[Large Language Model]
+    LLM --> Output[Generate Response]
+    
+    %% Colourful Styling
+    classDef memory fill:#ff9f43,stroke:#e67e22,stroke-width:3px,color:#fff,rx:10,ry:10;
+    classDef retrieval fill:#1abc9c,stroke:#16a085,stroke-width:3px,color:#fff,rx:10,ry:10;
+    classDef context fill:#9b59b6,stroke:#8e44ad,stroke-width:3px,color:#fff,rx:10,ry:10;
+    classDef llmNode fill:#2980b9,stroke:#2c3e50,stroke-width:4px,color:#fff,padding:40px,rx:15,ry:15;
+    classDef output fill:#27ae60,stroke:#2ecc71,stroke-width:3px,color:#fff,rx:10,ry:10;
+    
+    class OlderChunks,RecentChunks memory;
+    class TopK retrieval;
+    class ContextWindow context;
+    class LLM llmNode;
+    class Output output;
+```
+<p align="center"><u><sub>Retrieval & Sliding-Window based Context Management</sub></u></p>
+
+### LLM-Driven Vector Memory (Qdrant)
+- **Vector Searchable History**: The agent automatically backs up all conversational context to a persistent local Qdrant database (`qdrant_db`).
+- **Storage Optimization**: Rather than storing duplicated text inside Qdrant vector chunks, Harness implements a lightweight JSON payload system storing pointers (`trace_id`, `prompt_id`, `response_id`). During retrieval, the engine intercepts these pointers and dynamically re-stitches the exact text directly from local audit logs.
+- **LLM-Driven Retrieval Tool**: The orchestrator is equipped with a `search_memory` tool. Instead of an automated retrieval step, the LLM analyzes user queries and decides autonomously whether to search its past memories, prioritizing this action over internet searches.
+
 ### Invisible Search Delegation
-- **Sub-Agent Offloading**: Web searches are offloaded to an isolated LangGraph React sub-agent (`search_llm`) equipped with DuckDuckGo and Tavily tools.
-- **Encapsulated State**: The sub-agent runs with a clean, stateless configuration to keep the main message history minimal. Intermediate tool execution sequences and search iterations are hidden from the user, returning only the final synthesized query results to the main orchestrator.
+- **Native Ollama Search**: Web searches are handled via a custom reasoning loop utilizing Ollama's native `web_search` and `web_fetch` tools, directly leveraging the `ollama` Python client. 
+- **Port Usage**: The main orchestrator (`llama-server`) runs on `localhost:8000`, while the native search loop connects to the default Ollama API on `localhost:11434`.
+- **Encapsulated State**: Intermediate tool execution sequences and search iterations are hidden from the user, returning only the final synthesized query results to the main orchestrator without cluttering the main message history.
+
+### Context Compression and State Management
+- **Token Tracking & Sliding Window**: The `Archival Node` strictly manages the active conversation history inside the LangGraph State. By tracking prompt, response, and total token usage, it enforces a sliding token window. If the conversation breaches the configured token limit, it sequentially prunes the oldest turns, relying on the Qdrant database to store and retrieve them seamlessly later.
 
 ### Gated Tool Execution
 - **Interactive Permissions**: Tools containing write access or shell execution logic (`write_file` and `run_cmd`) are gated with terminal prompts. Execution halts programmatically and prompts for explicit `(Y/n)` permission. 
 - **Workspace Default Directory**: The `write_file` tool operates with a default directory rule. Unless the user explicitly requests changes in the current directory, the system prepends `workspace/` and handles directory creation (`os.makedirs`) dynamically.
 
-### Context Compression and State Management
-- **Token Tracking**: Harness tracks prompt, response, and total token usage inside its LangGraph State representation.
-- **Summarization Threshold**: When token count exceeds 90% of the maximum model context (configured via `SUMMARIZE_AT`), the execution state routes to `summarize_node`. The history is compressed into a structural brief (including task description, key context, and ignored items) using an optimization LLM, pruning redundant system logs to optimize context window space.
 
 ### Audit Tracing
 - **Structured Log Files**: Every terminal session creates an immutable, timestamped audit log inside the `execution_traces/` directory.
-- **Serialized Event Types**: Events are recorded in JSON-Lines format containing `timestamp`, `event_type` (`prompt`, `reasoning`, `tool-call`, `tool-output`, `error`, `final-response`), and `content`. Tool-call events record the exact function name and arguments invoked.
+- **Serialized Event Types**: Events are recorded in strict chronological JSON-Lines format containing `timestamp`, `event_type` (`reasoning`, `tool-call`, `tool-output`, `prompt`, `error`, `final-response`), and `content`. 
+
+### CLI Visuals
+- **ANSI Animation**: On startup, a beautifully animated ASCII rendition of the Harness logo is dynamically rendered to the terminal.
+- **Tool Spinners**: Interactive, animated spinners notify the user during background operations like `Digging through memory...` and `Searching the web...`.
 
 ---
 
 ## Installation
 
-1. **Prerequisites**: Python 3.12+ and Ollama running locally.
+1. **Prerequisites**: 
+   - **Python 3.12+**.
+   - **llama.cpp (`llama-server`)**: The orchestrator node runs the LLM via an OpenAI-compatible endpoint. This project uses Gemma-4 E4B served locally by `llama-server`, so the `llama-server` command must be installed and available in your `PATH`.
+   - **Ollama**: Running locally (used for guardrails and web searches).
 2. **Environment Setup**: Set up your Python virtual environment in the `.venv` directory and run dependencies setup.
 3. **Configuration**: Edit `config.yaml` to point to the correct model paths:
    ```yaml
-   default_orch_model: "~/models/gemma-4/e4b-it.gguf"
-   default_search_model: "llama3.2:3b"
-   default_guard_model: "shieldgemma:2b"
-   default_opt_model: "minimax-m3:cloud"
+   default_orch_model: "<model-path>"
+   default_search_model: "<model-name>"
+   default_guard_model: "<model-name>"
    ```
 4. **Command CLI Wrapper**: Install the CLI utility by running the setup script from the root directory:
    ```bash
@@ -66,19 +158,18 @@ harness
 
 - Submit queries at the `>` input prompt.
 - The CLI displays the orchestrator's reasoning trace in gray italics followed by the final output.
-- When background web search is running, the terminal displays `Searching the web...` in italics.
+- When background tasks run, the terminal displays animated text (e.g. `Searching the web...`).
 - Type `/bye` to exit the CLI session and terminate background processes.
 
 ---
 
-## Architecture
+## Repository Layout
 
-- **`src/graph.py`**: Defies the state machine graph, node functions, edge routing, and automated background model processes.
-- **`src/tools.py`**: Implementation of permissions, workspace defaults, and the React sub-agent definition.
+- **`src/graph.py`**: Defines the state machine graph, node functions, edge routing, and automated background model processes.
+- **`src/tools.py`**: Implementation of permissions, workspace defaults, and the React sub-agent definitions.
 - **`src/llm.py`**: LLM instances initialization and setup parameters.
+- **`src/prompts.py`**: Defines system prompts and instructions (e.g., `SYSTEM_PROMPT`) for guiding the orchestrator LLM.
+- **`src/utils.py`**: Utility functions for managing the `llama-server` subprocess lifecycle and session audit logging.
 - **`src/audit.py`**: Contains the `AuditLogger` singleton handling the write logic for structured JSON logs.
-
-### Graph Visualization
-<p align="center">
-  <img src="graph_visualization.png" alt="Harness Graph Visualization" width="600">
-</p>
+- **`src/memory.py`**: Handles Qdrant initialization, async embeddings generation, chunking logic, and dynamic reconstruction from trace logs.
+- **`src/cli.py`**: Contains the terminal UI framework, rendering engines, and animated spinners.
