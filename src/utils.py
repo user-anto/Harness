@@ -10,11 +10,11 @@ import uuid
 from urllib.error import URLError
 from langchain_core.messages import BaseMessage, ToolMessage, SystemMessage, AIMessage, HumanMessage, RemoveMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from audit import audit_logger
-from tools import tools
-from llm import client, orch_model, MODEL_CTX
+from .audit import audit_logger
+from .tools import tools
+from .llm import client, orch_model, MODEL_CTX
 
-from cli import Spinner
+from .cli import Spinner
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 openai_tools = [convert_to_openai_tool(t) for t in tools]
@@ -180,11 +180,24 @@ def _stream_llm(messages):
     else:
         print()
 
-    if usage and not tool_calls_dict:
-        print(f"\033[95m[Total Tokens: {usage.total_tokens}]\033[0m")
-
     full_content = "".join(content_parts)
     full_reasoning = "".join(reasoning_parts)
+    
+    if usage:
+        approx_reasoning_tokens = len(full_reasoning) // 4
+        try:
+            usage.completion_tokens = max(0, usage.completion_tokens - approx_reasoning_tokens)
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
+        except Exception:
+            class UsageMock:
+                def __init__(self, p, c):
+                    self.prompt_tokens = p
+                    self.completion_tokens = c
+                    self.total_tokens = p + c
+            usage = UsageMock(usage.prompt_tokens, max(0, usage.completion_tokens - approx_reasoning_tokens))
+            
+    if usage and not tool_calls_dict:
+        print(f"\033[95m[Total Tokens: {usage.total_tokens}]\033[0m")
     
     resp_id = str(uuid.uuid4())
     

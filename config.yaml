@@ -5,7 +5,6 @@ default_orch_model: "~/models/gemma-4/e4b-it.gguf"
 default_search_model: "llama3.2:3b"
 default_guard_model: "shieldgemma:2b"
 
-math_coding_model: "~/models/deepseek/r1-qwen.gguf"
 high_coding_model: "~/models/ornith/1-9b.gguf"
 xhigh_coding_model: "minimax-m3:cloud"
 

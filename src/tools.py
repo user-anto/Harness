@@ -1,13 +1,17 @@
 import os
 import subprocess
 import urllib.request
+import httpx
+from bs4 import BeautifulSoup
+from markdownify import markdownify as md
 from langchain_core.tools import tool
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables before setting up clients
 
-from llm import config
+from .llm import config
 import ollama
-from memory import retrieve_context
+from .memory import retrieve_context
+from .cli import Spinner
 
 @tool
 def search_memory(query: str) -> str:
@@ -20,40 +24,55 @@ def search_memory(query: str) -> str:
         return result
 
 @tool
+def evaluate_math(expression: str) -> str:
+    """Evaluate a mathematical expression (e.g., '2 + 2 * 3'). Supports basic arithmetic (+, -, *, /, **, %)."""
+    try:
+        result = eval(expression, {"__builtins__": {}}, {})
+        return str(result)
+    except Exception as e:
+        return f"Error evaluating expression: {str(e)}"
+
+@tool
 def long_int_multiply(num1: str, num2: str) -> str:
     """Multiply two arbitrarily large integers passed as strings."""
-    return str(int(num1) * int(num2))
+    try:
+        return str(int(num1) * int(num2))
+    except Exception:
+        return "Error: Input must be valid integers."
 
 @tool
 def read_file(path: str) -> str:
     """Read the contents of a local file."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        with Spinner("Reading file..."):
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
 @tool
 def write_file(path: str, content: str) -> str:
-    """Write content to a local file.
-    If creating a new file:
-        - place it in the 'workspace/' directory by default. (Use 'mkdir -p' command with the run_cmd tool to create the directory if needed.)
-        - unless the user explicitly requests it in a certain specified directory."""
+    """Write content to a local file."""
     abort = _ask_permission(f"\n\033[93mPermission to execute write_file on {path}? (Y/n, or provide feedback): \033[0m")
     if abort:
         return abort
     try:
+        eval_env = os.getenv("HARNESS_EVAL_ENV")
+        if eval_env:
+            path = os.path.join(eval_env, os.path.basename(path))
+            
         dir_name = os.path.dirname(os.path.abspath(path))
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        with Spinner("Writing file..."):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
         return f"Successfully wrote to {path}"
     except Exception as e:
         return f"Error writing file: {str(e)}"
 
 def _ask_permission(prompt: str) -> str | None:
-    """Return None if allowed, else abort reason."""
+    """Return None if allowed, else abort with reason."""
     ans = input(prompt).strip()
     low = ans.lower()
     if low in ("n", "no"):
@@ -112,15 +131,32 @@ def git_diff(repo_path: str = ".") -> str:
 
 @tool
 def fetch_url(url: str) -> str:
-    """Fetch content from a URL via HTTP request."""
+    """Fetch content from a URL, clean it, and convert to validated Markdown."""
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return response.read().decode('utf-8')
+        with Spinner("Fetching URL..."):
+            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                response = client.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+                response.raise_for_status()
+                html_content = response.text
+                
+        with Spinner("Processing DOM..."):
+            soup = BeautifulSoup(html_content, 'html.parser')
+            # Remove unnecessary tags
+            for element in soup(["script", "style", "noscript", "meta", "header", "footer", "nav"]):
+                element.decompose()
+                
+            clean_html = str(soup)
+            markdown_content = md(clean_html, heading_style="ATX", strip=['script', 'style'])
+
+            output_file = os.path.join(os.getcwd(), "fetched_content.art.md")
+            with open(output_file, "w") as f:
+                f.write(markdown_content)
+                
+            excerpt = markdown_content[:200].replace('\n', ' ')
+            return f"Success. Markdown saved to {output_file}\nExcerpt: {excerpt}..."
+            
     except Exception as e:
         return f"Error fetching URL: {str(e)}"
-
-from cli import Spinner
 
 @tool
 def perform_web_search(query: str) -> str:
@@ -193,8 +229,16 @@ def perform_web_search(query: str) -> str:
     print("\033[90mSearched the web\033[0m")
     return final_result
 
+@tool
+def task_complete(task_description: str) -> str:
+    """Mark a task as complete in the planner. Only call this when you have successfully finished the task."""
+    return "Task marked complete."
+
+
 tools = [
+    task_complete,
     long_int_multiply, 
+    evaluate_math,
     read_file,
     write_file,
     list_dir,

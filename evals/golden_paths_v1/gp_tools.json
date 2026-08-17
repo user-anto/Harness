@@ -1,0 +1,395 @@
+{
+    "tasks": [
+        {
+            "task_id": "tools_math_0",
+            "description": "Diverse math calculation 0",
+            "prompt": "Calculate 12 + 15 and write to math_0.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_0.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 27"
+        },
+        {
+            "task_id": "tools_math_1",
+            "description": "Diverse math calculation 1",
+            "prompt": "Calculate 144 / 12 and write to math_1.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_1.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 12.0"
+        },
+        {
+            "task_id": "tools_math_2",
+            "description": "Diverse math calculation 2",
+            "prompt": "If x=5 and y=10, evaluate 'x**2 + y**2' and write to math_2.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_2.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 125"
+        },
+        {
+            "task_id": "tools_math_3",
+            "description": "Diverse math calculation 3",
+            "prompt": "Determine if 2**10 is greater than 10**3, write the boolean to math_3.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_3.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate True"
+        },
+        {
+            "task_id": "tools_math_4",
+            "description": "Diverse math calculation 4",
+            "prompt": "Multiply 123456789 by 987654321 using long_int_multiply and write to math_4.txt",
+            "expected_tool_calls": [
+                "long_int_multiply",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_4.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 121932631112635269"
+        },
+        {
+            "task_id": "tools_math_5",
+            "description": "Diverse math calculation 5",
+            "prompt": "Multiply 555555555 by 444444444 using long_int_multiply and write to math_5.txt",
+            "expected_tool_calls": [
+                "long_int_multiply",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_5.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 246913579753086420"
+        },
+        {
+            "task_id": "tools_math_6",
+            "description": "Diverse math calculation 6",
+            "prompt": "Evaluate '(1024 / 32) * (5 ** 3) - 100' and write to math_6.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_6.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 3900.0"
+        },
+        {
+            "task_id": "tools_math_7",
+            "description": "Diverse math calculation 7",
+            "prompt": "Calculate the volume of a cylinder (r=3, h=10) using 3.14 for pi and write to math_7.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_7.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 282.6"
+        },
+        {
+            "task_id": "tools_math_8",
+            "description": "Diverse math calculation 8",
+            "prompt": "Evaluate '(((10 + 5) * 2) ** 2) / 10' and write to math_8.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_8.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 90.0"
+        },
+        {
+            "task_id": "tools_math_9",
+            "description": "Diverse math calculation 9",
+            "prompt": "Evaluate '1000 % 333 + 25 * 4' and write to math_9.txt",
+            "expected_tool_calls": [
+                "evaluate_math",
+                "write_file"
+            ],
+            "expected_files": [
+                "math_9.txt"
+            ],
+            "evaluation_criteria": "Agent must calculate 101"
+        },
+        {
+            "task_id": "tools_file_read_0",
+            "description": "Diverse file operation 0",
+            "prompt": "List the contents of the 'src' directory and write to search_results_0.txt",
+            "expected_tool_calls": [
+                "list_dir",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_0.txt"
+            ],
+            "evaluation_criteria": "Agent must use list_dir on src"
+        },
+        {
+            "task_id": "tools_file_read_1",
+            "description": "Diverse file operation 1",
+            "prompt": "Search the codebase for 'def search_memory' and write the match to search_results_1.txt",
+            "expected_tool_calls": [
+                "search_code",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_1.txt"
+            ],
+            "evaluation_criteria": "Agent must use search_code"
+        },
+        {
+            "task_id": "tools_file_read_2",
+            "description": "Diverse file operation 2",
+            "prompt": "Read the file 'config.yaml' and write its contents to search_results_2.txt",
+            "expected_tool_calls": [
+                "read_file",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_2.txt"
+            ],
+            "evaluation_criteria": "Agent must use read_file on config.yaml"
+        },
+        {
+            "task_id": "tools_file_read_3",
+            "description": "Diverse file operation 3",
+            "prompt": "Search the codebase for 'OLLAMA_API_KEY' and write the matches to search_results_3.txt",
+            "expected_tool_calls": [
+                "search_code",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_3.txt"
+            ],
+            "evaluation_criteria": "Agent must use search_code"
+        },
+        {
+            "task_id": "tools_file_read_4",
+            "description": "Diverse file operation 4",
+            "prompt": "List the contents of the current directory and write to search_results_4.txt",
+            "expected_tool_calls": [
+                "list_dir",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_4.txt"
+            ],
+            "evaluation_criteria": "Agent must use list_dir"
+        },
+        {
+            "task_id": "tools_file_read_5",
+            "description": "Diverse file operation 5",
+            "prompt": "Search the codebase for 'import yaml' and write the matched lines to search_results_5.txt",
+            "expected_tool_calls": [
+                "search_code",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_5.txt"
+            ],
+            "evaluation_criteria": "Agent must use search_code"
+        },
+        {
+            "task_id": "tools_file_read_6",
+            "description": "Diverse file operation 6",
+            "prompt": "Read the file 'pyproject.toml' and write it to search_results_6.txt",
+            "expected_tool_calls": [
+                "read_file",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_6.txt"
+            ],
+            "evaluation_criteria": "Agent must use read_file"
+        },
+        {
+            "task_id": "tools_file_read_7",
+            "description": "Diverse file operation 7",
+            "prompt": "Search the codebase for 'from .llm import' and write the files to search_results_7.txt",
+            "expected_tool_calls": [
+                "search_code",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_7.txt"
+            ],
+            "evaluation_criteria": "Agent must use search_code"
+        },
+        {
+            "task_id": "tools_file_read_8",
+            "description": "Diverse file operation 8",
+            "prompt": "List the contents of 'evals' directory and write to search_results_8.txt",
+            "expected_tool_calls": [
+                "list_dir",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_8.txt"
+            ],
+            "evaluation_criteria": "Agent must use list_dir on evals"
+        },
+        {
+            "task_id": "tools_file_read_9",
+            "description": "Diverse file operation 9",
+            "prompt": "Search the codebase for 'subprocess.run' and write the results to search_results_9.txt",
+            "expected_tool_calls": [
+                "search_code",
+                "write_file"
+            ],
+            "expected_files": [
+                "search_results_9.txt"
+            ],
+            "evaluation_criteria": "Agent must use search_code"
+        },
+        {
+            "task_id": "tools_chain_0",
+            "description": "Diverse tool chaining 0",
+            "prompt": "Run a web search for 'Python 3.12 release date' and write the result to git_status_0.txt",
+            "expected_tool_calls": [
+                "perform_web_search",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_0.txt"
+            ],
+            "evaluation_criteria": "Agent must use web search"
+        },
+        {
+            "task_id": "tools_chain_1",
+            "description": "Diverse tool chaining 1",
+            "prompt": "Run git diff and write the output to git_status_1.txt",
+            "expected_tool_calls": [
+                "git_diff",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_1.txt"
+            ],
+            "evaluation_criteria": "Agent must use git_diff"
+        },
+        {
+            "task_id": "tools_chain_2",
+            "description": "Diverse tool chaining 2",
+            "prompt": "Fetch the URL 'http://example.com' and write the excerpt to git_status_2.txt",
+            "expected_tool_calls": [
+                "fetch_url",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_2.txt"
+            ],
+            "evaluation_criteria": "Agent must use fetch_url"
+        },
+        {
+            "task_id": "tools_chain_3",
+            "description": "Diverse tool chaining 3",
+            "prompt": "Search memory for 'database' and write the history to git_status_3.txt",
+            "expected_tool_calls": [
+                "search_memory",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_3.txt"
+            ],
+            "evaluation_criteria": "Agent must use search_memory"
+        },
+        {
+            "task_id": "tools_chain_4",
+            "description": "Diverse tool chaining 4",
+            "prompt": "Use run_cmd to execute 'echo Hello World' and write the output to git_status_4.txt",
+            "expected_tool_calls": [
+                "run_cmd",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_4.txt"
+            ],
+            "evaluation_criteria": "Agent must use run_cmd"
+        },
+        {
+            "task_id": "tools_chain_5",
+            "description": "Diverse tool chaining 5",
+            "prompt": "Check the git status and write it to git_status_5.txt",
+            "expected_tool_calls": [
+                "git_status",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_5.txt"
+            ],
+            "evaluation_criteria": "Agent must use git_status"
+        },
+        {
+            "task_id": "tools_chain_6",
+            "description": "Diverse tool chaining 6",
+            "prompt": "Run a web search for 'Latest Ollama features' and write to git_status_6.txt",
+            "expected_tool_calls": [
+                "perform_web_search",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_6.txt"
+            ],
+            "evaluation_criteria": "Agent must use web search"
+        },
+        {
+            "task_id": "tools_chain_7",
+            "description": "Diverse tool chaining 7",
+            "prompt": "Use run_cmd to execute 'ls -la' and write the output to git_status_7.txt",
+            "expected_tool_calls": [
+                "run_cmd",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_7.txt"
+            ],
+            "evaluation_criteria": "Agent must use run_cmd"
+        },
+        {
+            "task_id": "tools_chain_8",
+            "description": "Diverse tool chaining 8",
+            "prompt": "Fetch the URL 'https://example.org' and write to git_status_8.txt",
+            "expected_tool_calls": [
+                "fetch_url",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_8.txt"
+            ],
+            "evaluation_criteria": "Agent must use fetch_url"
+        },
+        {
+            "task_id": "tools_chain_9",
+            "description": "Diverse tool chaining 9",
+            "prompt": "Run git status, then run git diff, and write both to git_status_9.txt",
+            "expected_tool_calls": [
+                "git_status",
+                "git_diff",
+                "write_file"
+            ],
+            "expected_files": [
+                "git_status_9.txt"
+            ],
+            "evaluation_criteria": "Agent must use git status and diff"
+        }
+    ]
+}
