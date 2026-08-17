@@ -16,9 +16,13 @@ graph TD
     User([User Input]) --> InputNode[Input Node]
     
     %% Guardrail Security
-    InputNode --> Guardrail{Guardrail Node}
+    InputNode --> Guardrail{Guardrail Node\n+ Base64/Hex Decoder}
     Guardrail -- Injection Detected --> Reject[Reject Request & Log Error]
-    Guardrail -- Safe Input --> OrchNode[Orchestrator Node]
+    Guardrail -- Safe Input --> Router{Input Router}
+    
+    Router -- "/plan detected" --> PlannerNode[Planner Node]
+    Router -- "Default Input" --> OrchNode[Orchestrator Node]
+    PlannerNode -- "Injects Task List" --> OrchNode
     
     %% Main LLM Engine
     OrchNode -- "Streams Prompt & History" --> LLM[(Local llama-server)]
@@ -53,7 +57,7 @@ graph TD
     classDef security fill:#E94B3C,stroke:#333,stroke-width:2px,color:#fff;
     classDef tool fill:#F5A623,stroke:#333,stroke-width:2px,color:#fff;
     
-    class InputNode,OrchNode,ArchivalNode,ToolNode primary;
+    class InputNode,Router,PlannerNode,OrchNode,ArchivalNode,ToolNode primary;
     class LLM,Qdrant,Traces,LangGraphState,OllamaAPI storage;
     class Guardrail,Reject security;
     class Tools,MemSearch,WebSearch,SysTools tool;
@@ -67,8 +71,9 @@ graph TD
 - **Log Redirection**: The server output is redirected to `llama-server.log` in the project root to prevent stdout/stderr clutter in the main terminal interface.
 
 ### Input Guardrails
-- **Prompt Injection Defense**: Every raw user input is processed by a dedicated `guard_node` utilizing `guard_llm` (configured for ShieldGemma) before entering the orchestrator state graph. 
-- **Deterministic Routing**: If the guard model classifies the input as an injection attack, the graph aborts immediately and returns a rejection message, bypassing the main orchestration engine entirely.
+- **Prompt Injection Defense**: Every raw user input is processed by a dedicated `guard_node` utilizing `guard_llm` (configured for ShieldGemma) before entering the orchestrator state graph. It implements entropy/special-character ratio limits (ignoring safe math symbols) to catch obfuscation.
+- **Inline Obfuscation Decoding**: The guardrail automatically intercepts short Base64 and Hex strings, decoding them inline to check against blacklisted payloads (e.g., `system prompt` or `bypass` directives) without relying purely on regex length limits.
+- **Deterministic Routing**: If the guard model or heuristic checks classify the input as an injection attack, the graph aborts immediately and returns a rejection message, bypassing the main orchestration engine entirely.
 
 
 ```mermaid
@@ -116,6 +121,7 @@ graph TD
 ### Gated Tool Execution
 - **Interactive Permissions**: Tools containing write access or shell execution logic (`write_file` and `run_cmd`) are gated with terminal prompts. Execution halts programmatically and prompts for explicit `(Y/n)` permission. 
 - **Workspace Default Directory**: The `write_file` tool operates with a default directory rule. Unless the user explicitly requests changes in the current directory, the system prepends `workspace/` and handles directory creation (`os.makedirs`) dynamically.
+- **OOM Prevention in Shell Tools**: Heavy command tools like `search_code` leverage `subprocess.Popen` streams to chunk standard output, automatically terminating runaway recursive greps and limiting returned strings to ~100KB to protect the LLM context window and prevent Python memory crashes.
 
 
 ### Audit Tracing
@@ -125,6 +131,48 @@ graph TD
 ### CLI Visuals
 - **ANSI Animation**: On startup, a beautifully animated ASCII rendition of the Harness logo is dynamically rendered to the terminal.
 - **Tool Spinners**: Interactive, animated spinners notify the user during background operations like `Digging through memory...` and `Searching the web...`.
+
+---
+
+## Evaluations
+
+Harness includes an automated evaluation suite to benchmark the orchestrator model against three golden-path datasets (`gp_tools`, `gp_hitl`, `gp_redteam`). The evaluation traces are independently graded by LLM judges `gemma4:31b-cloud` and `gpt-oss:120b-cloud`.
+
+```mermaid
+graph TD
+    %% Datasets
+    Datasets[(Golden Path Datasets\ngp_tools, gp_hitl, gp_redteam)] --> EvalHarness[Evaluation Harness\nrun_evals.py]
+    
+    %% Simulation
+    EvalHarness -- "Tool Permissions & Context" --> Simulator[LLM User Simulator\ngemma4:31b-cloud\n(Only for gp_hitl)]
+    Simulator -- "Dynamic Approvals / Denials / Feedback" --> EvalHarness
+    
+    %% Execution
+    EvalHarness -- "Mocked Input Stream" --> HarnessEngine[Harness Agent Graph]
+    HarnessEngine -- "Execution Traces" --> Judge[LLM Judges]
+    
+    %% Evaluation
+    Judge -- "Pass/Fail Criteria" --> Results[(results.csv)]
+    
+    classDef primary fill:#4A90E2,stroke:#333,stroke-width:2px,color:#fff;
+    classDef storage fill:#50E3C2,stroke:#333,stroke-width:2px,color:#000;
+    classDef tool fill:#F5A623,stroke:#333,stroke-width:2px,color:#fff;
+    
+    class EvalHarness,HarnessEngine primary;
+    class Datasets,Results storage;
+    class Simulator,Judge tool;
+```
+<p align="center"><u><sub>Automated Evaluation & Simulation Architecture</sub></u></p>
+
+<p align="center"><img src="evals/spider_plot.png" width="600"></p>
+
+**=== Evaluation Results Summary ===**
+- **Tool Use**            : Gemma = 29/30 (96.7%), GPT = 29/30 (96.7%)
+- **Red-Teaming**         : Gemma = 26/30 (86.7%), GPT = 26/30 (86.7%)
+- **Human-in-the-Loop**   : Gemma = 27/30 (90.0%), GPT = 27/30 (90.0%)
+
+### LLM User Simulator
+To rigorously test the agent's Human-in-the-Loop (`gp_hitl`) capabilities, the evaluation harness employs a real-time **LLM User Simulator**. Instead of static string responses, a secondary `gemma4:31b-cloud` model dynamically plays the role of the user, generating approvals, denials, conversational tool feedback, and multi-turn context checks based on the dataset's objectives.
 
 ---
 

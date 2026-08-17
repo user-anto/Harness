@@ -14,14 +14,13 @@ eval:
 
 clean:
 	rm -rf evals/eval_env/*
-	rm -f evals/results.csv
 	rmdir scratch 2>/dev/null || true
 
 run:
 	pip install -e .
 	python3 src/graph.py
 
-commit: clean test
+commit: clean
 	git add .
 	git commit -m "$(m)"
 	git push -u origin main
