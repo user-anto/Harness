@@ -200,44 +200,92 @@ To rigorously test the agent's Human-in-the-Loop (`gp_hitl`) capabilities, the e
 
 1. **Prerequisites**: 
    - **Python 3.12+**.
-   - **llama.cpp (`llama-server`)**: The orchestrator node runs the LLM via an OpenAI-compatible endpoint. This project uses Gemma-4 E4B served locally by `llama-server`, so the `llama-server` command must be installed and available in your `PATH`.
+   - **llama.cpp (`llama-server`)**: The orchestrator node runs the LLM via an OpenAI-compatible endpoint. Ensure `llama-server` is installed and available in your `PATH`.
    - **Ollama**: Running locally (used for guardrails and web searches).
-2. **Environment Setup**: Set up your Python virtual environment in the `.venv` directory and run dependencies setup.
-3. **Configuration**: Edit `config.yaml` to point to the correct model paths:
+   - **Glow (Optional)**: Terminal markdown renderer used to display structured plans in Planning Mode.
+
+2. **Configuration**: Edit `config.yaml` to point to the correct model paths:
    ```yaml
    default_orch_model: "<model-path>"
    default_search_model: "<model-name>"
    default_guard_model: "<model-name>"
    ```
-4. **Command CLI Wrapper**: Install the CLI utility by running the setup script from the root directory:
+
+3. **Installation & CLI Wrapper**: Install dependencies and set up the global command:
    ```bash
-   ./install.sh
+   make install
    ```
-   This generates a wrapper script at `~/.local/bin/harness` that handles path resolution, virtual environment activation, and configuration loading.
+   This automatically initializes the virtual environment in `.venv`, installs dependencies in editable mode, and links the executable `harness` command to `~/.local/bin/harness`. Ensure `~/.local/bin` is in your `PATH` (e.g., `export PATH="$HOME/.local/bin:$PATH"`).
 
 ---
 
 ## Usage
 
-Run the global CLI command from any terminal directory:
+### Starting the Agent
+Launch Harness either using the globally installed wrapper or directly via `make`:
+
 ```bash
+# Launch from anywhere in the terminal
 harness
+
+# Or launch directly from the repository root
+make run
 ```
 
-- Submit queries at the `>` input prompt.
-- The CLI displays the orchestrator's reasoning trace in gray italics followed by the final output.
-- When background tasks run, the terminal displays animated text (e.g. `Searching the web...`).
-- Type `/bye` to exit the CLI session and terminate background processes.
+On startup, Harness renders an animated ASCII banner, verifies the local `llama-server` process (starting it automatically if not running), and presents the interactive `>` prompt.
+
+### Interaction & Commands
+- **Standard Conversation**: Submit natural language queries at the `>` prompt. The CLI displays real-time reasoning traces in gray italics followed by the final answer.
+- **Planning Mode (`/plan <goal>`)**: Break down complex requests into a sequential task checklist. Harness generates discrete steps, renders the plan via `glow`, and prompts for user feedback:
+  ```text
+  > /plan Refactor memory module and add unit tests
+  Proceed with plan? (Y/n/feedback): 
+  ```
+  Once approved, Harness systematically executes tasks one by one, verifying each step with `task_complete`.
+- **Human-in-the-Loop Safeguards**: Actions modifying system state (e.g. `write_file`, `run_cmd`) programmatically pause and request interactive confirmation:
+  ```text
+  Permission to execute command 'pytest' in cwd '.'? (Y/n, or provide feedback):
+  ```
+- **Session Termination (`/bye`)**: Type `/bye` to exit. Harness cleans up temporary plan artifacts and terminates background subprocesses gracefully.
+
+### Evaluation Suite
+Run benchmark evaluations across all three golden paths (`gp_tools`, `gp_hitl`, `gp_redteam`):
+
+```bash
+# Run quick dry-run test
+make test
+
+# Run full evaluation benchmark suite and generate spider plot
+make eval
+
+# Re-generate the 3-axis radar chart from existing results.csv
+make plot
+
+# Clean evaluation sandbox and temporary artifacts
+make clean
+```
 
 ---
 
 ## Repository Layout
 
-- **`src/graph.py`**: Defines the state machine graph, node functions, edge routing, and automated background model processes.
-- **`src/tools.py`**: Implementation of permissions, workspace defaults, and the React sub-agent definitions.
-- **`src/llm.py`**: LLM instances initialization and setup parameters.
-- **`src/prompts.py`**: Defines system prompts and instructions (e.g., `SYSTEM_PROMPT`) for guiding the orchestrator LLM.
-- **`src/utils.py`**: Utility functions for managing the `llama-server` subprocess lifecycle and session audit logging.
-- **`src/audit.py`**: Contains the `AuditLogger` singleton handling the write logic for structured JSON logs.
-- **`src/memory.py`**: Handles Qdrant initialization, async embeddings generation, chunking logic, and dynamic reconstruction from trace logs.
-- **`src/cli.py`**: Contains the terminal UI framework, rendering engines, and animated spinners.
+### Core Framework (`src/`)
+- **`src/graph.py`**: Defines the state machine graph, node functions (`input_node`, `planner_node`, `orchestrator_node`, `tool_node`, `archival_node`), conditional routing, and model orchestration.
+- **`src/tools.py`**: Tool definitions, interactive permissions, sandbox path defaults, and streaming OOM prevention.
+- **`src/llm.py`**: LLM client setup and model parameter configurations.
+- **`src/prompts.py`**: System prompts (`SYSTEM_PROMPT`), planner templates, guard prompts, and LLM judge evaluation criteria.
+- **`src/utils.py`**: Lifecycle management utilities for background `llama-server` subprocesses and trace formatting.
+- **`src/audit.py`**: `AuditLogger` singleton for recording structured, immutable JSON-Lines execution traces.
+- **`src/memory.py`**: Qdrant vector database integration, async embedding generation, sliding window chunking, and memory re-stitching.
+- **`src/cli.py`**: Terminal UI rendering engine, ASCII logo animations, and interactive progress spinners.
+
+### Evaluation Suite (`evals/`)
+- **`evals/run_evals.py`**: Benchmark runner orchestrating automated task execution, LLM User Simulation, and dual cloud judge evaluations.
+- **`evals/spider.py`**: Visualizer script generating the 3-axis radar benchmark plot (`spider_plot.png`) from test results.
+- **`evals/golden_paths_v1/`**: Golden-path benchmark evaluation datasets:
+  - `gp_tools.json`: Single and multi-step tool invocation test cases.
+  - `gp_hitl.json`: Human-in-the-Loop approval, denial, feedback, and multi-turn conversational recall tasks.
+  - `gp_redteam.json`: Adversarial prompt injection, jailbreak, and system prompt extraction attacks.
+- **`evals/results.csv`**: Incremental CSV log recording task outcomes and judge decisions.
+- **`evals/eval_env/`**: Sandboxed environment directory for isolated file write operations during evaluation runs.
+- **`evals/spider_plot.png`**: Generated radar chart visualizing model benchmark performance across all three categories.

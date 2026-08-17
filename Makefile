@@ -29,6 +29,12 @@ plot:
 	python3 evals/spider.py
 
 install:
+	@if [ ! -d ".venv" ]; then \
+		echo "Creating virtual environment in .venv..."; \
+		python3 -m venv .venv; \
+	fi
+	@echo "Installing dependencies..."
+	@.venv/bin/pip install -e .
 	@mkdir -p ~/.local/bin
 	@echo '#!/bin/bash' > ~/.local/bin/harness
 	@echo 'export PYTHONPATH="$$PYTHONPATH:$(PWD)/src"' >> ~/.local/bin/harness
