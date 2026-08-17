@@ -93,8 +93,29 @@ def list_dir(path: str) -> str:
 def search_code(directory: str, query: str) -> str:
     """Search for a string in a directory recursively using grep."""
     try:
-        result = subprocess.run(["grep", "-rn", query, directory], capture_output=True, text=True)
-        return result.stdout if result.stdout else "No matches found."
+        cmd = [
+            "grep", "-rnI", 
+            "--exclude-dir=.git", "--exclude-dir=.venv", 
+            "--exclude-dir=venv", "--exclude-dir=node_modules", 
+            "--exclude-dir=__pycache__", "--exclude-dir=build", 
+            "--exclude-dir=dist", query, directory
+        ]
+        
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        stdout_data = ""
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+            stdout_data += chunk
+            if len(stdout_data) > 100000:
+                process.terminate()
+                stdout_data += "\n...[Output truncated due to size limit]..."
+                break
+                
+        process.wait()
+        return stdout_data if stdout_data else "No matches found."
     except Exception as e:
         return f"Error searching code: {str(e)}"
 

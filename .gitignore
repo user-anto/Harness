@@ -12,3 +12,4 @@ qdrant_db
 graph_visualization.png
 Harness.egg-info
 .pytest_cache
+scratch
