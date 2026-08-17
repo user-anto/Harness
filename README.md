@@ -140,27 +140,47 @@ Harness includes an automated evaluation suite to benchmark the orchestrator mod
 
 ```mermaid
 graph TD
-    %% Datasets
-    Datasets[(Golden Path Datasets\ngp_tools, gp_hitl, gp_redteam)] --> EvalHarness[Evaluation Harness\nrun_evals.py]
+    %% Datasets & Benchmarks
+    subgraph Benchmarks ["Golden Path Benchmarks"]
+        GPTools["gp_tools.json<br/>(Tool Use)"]
+        GPHITL["gp_hitl.json<br/>(Human-in-the-Loop)"]
+        GPRedteam["gp_redteam.json<br/>(Red-Teaming)"]
+    end
+
+    %% Evaluation Runner
+    Benchmarks --> EvalHarness["Evaluation Runner<br/>(evals/run_evals.py)"]
     
-    %% Simulation
-    EvalHarness -- "Tool Permissions & Context" --> Simulator[LLM User Simulator\ngemma4:31b-cloud\n(Only for gp_hitl)]
-    Simulator -- "Dynamic Approvals / Denials / Feedback" --> EvalHarness
+    %% Simulation & Mock Inputs
+    EvalHarness -- "gp_hitl: Stream Context" --> Simulator["LLM User Simulator<br/>(gemma4:31b-cloud)"]
+    Simulator -- "Dynamic Responses / Feedback" --> EvalHarness
+    EvalHarness -- "gp_tools / gp_redteam" --> MockInputs["Static Mock Inputs"]
     
-    %% Execution
-    EvalHarness -- "Mocked Input Stream" --> HarnessEngine[Harness Agent Graph]
-    HarnessEngine -- "Execution Traces" --> Judge[LLM Judges]
+    %% Sandbox & Execution
+    EvalHarness --> Sandbox[("Isolated Sandbox<br/>evals/eval_env/")]
+    EvalHarness -- "Streamed Input Events" --> HarnessGraph["Harness Agent Graph<br/>(src/graph.py)"]
+    HarnessGraph -. "File Ops Containment" .-> Sandbox
     
-    %% Evaluation
-    Judge -- "Pass/Fail Criteria" --> Results[(results.csv)]
+    %% Evaluation & Judging
+    HarnessGraph -- "Formatted Traces" --> JudgeRouter{"LLM Judges"}
+    JudgeRouter --> JudgeGemma["gemma4:31b-cloud"]
+    JudgeRouter --> JudgeGPT["gpt-oss:120b-cloud"]
     
+    %% Output & Reporting
+    JudgeGemma -- "PASS / FAIL" --> ResultsCSV[("evals/results.csv")]
+    JudgeGPT -- "PASS / FAIL" --> ResultsCSV
+    ResultsCSV --> SpiderGen["Visualizer<br/>(evals/spider.py)"]
+    SpiderGen --> SpiderPlot["spider_plot.png"]
+
+    %% Styling
     classDef primary fill:#4A90E2,stroke:#333,stroke-width:2px,color:#fff;
     classDef storage fill:#50E3C2,stroke:#333,stroke-width:2px,color:#000;
     classDef tool fill:#F5A623,stroke:#333,stroke-width:2px,color:#fff;
+    classDef security fill:#E94B3C,stroke:#333,stroke-width:2px,color:#fff;
     
-    class EvalHarness,HarnessEngine primary;
-    class Datasets,Results storage;
-    class Simulator,Judge tool;
+    class EvalHarness,HarnessGraph,SpiderGen primary;
+    class Sandbox,ResultsCSV,SpiderPlot storage;
+    class Simulator,JudgeGemma,JudgeGPT tool;
+    class JudgeRouter,MockInputs security;
 ```
 <p align="center"><u><sub>Automated Evaluation & Simulation Architecture</sub></u></p>
 
