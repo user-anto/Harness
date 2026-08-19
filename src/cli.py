@@ -4,6 +4,9 @@ import threading
 import sys
 import time
 
+import os
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASCII_CHARS = " .:=-+*%@,/?'\"`~|()&^$"
 ansi = lambda r, g, b: f"\033[38;2;{r};{g};{b}m"
 
@@ -28,7 +31,9 @@ def get_large_text_lines():
         combined.append(f"{line}\033[38;2;255;255;255m{dl.ljust(d_max)}\033[0m")
     return combined, h_max + d_max
 
-def render_terminal_ui(image_path="/home/ranta_unix/projects/Harness/logo.png", total_width=110):
+def render_terminal_ui(image_path=None, total_width=110):
+    if image_path is None:
+        image_path = os.path.join(BASE_DIR, "logo.png")
     try:
         img = Image.open(image_path).convert('RGB')
     except Exception as e:

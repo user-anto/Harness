@@ -18,7 +18,7 @@ clean:
 
 run:
 	pip install -e .
-	python3 src/graph.py
+	python3 -m src.graph
 
 commit: clean
 	git add .
@@ -37,11 +37,11 @@ install:
 	@.venv/bin/pip install -e .
 	@mkdir -p ~/.local/bin
 	@echo '#!/bin/bash' > ~/.local/bin/harness
-	@echo 'export PYTHONPATH="$$PYTHONPATH:$(PWD)/src"' >> ~/.local/bin/harness
+	@echo 'export PYTHONPATH="$(PWD):$$PYTHONPATH"' >> ~/.local/bin/harness
 	@echo 'if [ -f "$(PWD)/.venv/bin/python" ]; then' >> ~/.local/bin/harness
-	@echo '    exec "$(PWD)/.venv/bin/python" "$(PWD)/src/graph.py" "$$@"' >> ~/.local/bin/harness
+	@echo '    exec "$(PWD)/.venv/bin/python" -m src.graph "$$@"' >> ~/.local/bin/harness
 	@echo 'else' >> ~/.local/bin/harness
-	@echo '    exec python3 "$(PWD)/src/graph.py" "$$@"' >> ~/.local/bin/harness
+	@echo '    exec python3 -m src.graph "$$@"' >> ~/.local/bin/harness
 	@echo 'fi' >> ~/.local/bin/harness
 	@chmod +x ~/.local/bin/harness
 	@echo "'harness' command installed to ~/.local/bin/harness"
