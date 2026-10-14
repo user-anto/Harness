@@ -1,7 +1,6 @@
 .venv
 my*
 .env
-.claude/
 __pycache__
 llama-server.log
 execution_traces/

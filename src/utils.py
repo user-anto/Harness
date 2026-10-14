@@ -7,6 +7,7 @@ import urllib.request
 import sys
 import threading
 import uuid
+import shutil
 from urllib.error import URLError
 from langchain_core.messages import BaseMessage, ToolMessage, SystemMessage, AIMessage, HumanMessage, RemoveMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -22,8 +23,10 @@ openai_tools = [convert_to_openai_tool(t) for t in tools]
 # llama-server initialization helper
 def start_llama_server(model_path):
     model_path = os.path.expanduser(model_path)
+    server_url = os.getenv("HARNESS_LLAMA_SERVER_URL", "http://localhost:8000")
+
     try:
-        req = urllib.request.Request("http://localhost:8000/v1/models")
+        req = urllib.request.Request(f"{server_url}/v1/models")
         with urllib.request.urlopen(req, timeout=1):
             return None # Server is already running
     except URLError:
@@ -31,43 +34,125 @@ def start_llama_server(model_path):
 
     spinner = Spinner("Starting llama-server...")
     spinner.__enter__()
-    log_file = open(os.path.join(BASE_DIR, "llama-server.log"), "w")
-    cmd = [
-        "llama-server",
-        "-m", model_path,
-        "-ngl", "999",
-        "--ctx-size", str(MODEL_CTX),
-        "-ctk", "q8_0",
-        "-ctv", "q8_0",
-        "--host", "0.0.0.0",
-        "--port", "8000"
-    ]
-    process = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
-    
-    def cleanup():
-        with Spinner("Shutting down llama-server..."):
+    log_path = os.path.join(BASE_DIR, "llama-server.log")
+    timeout = float(os.getenv("HARNESS_LLAMA_STARTUP_TIMEOUT", "120"))
+
+    # A locally built CUDA server can be first on PATH even when the CUDA
+    # runtime is not installed. Ollama ships a CPU-capable llama-server, so
+    # keep it as a fallback instead of allowing a dead process to reach the
+    # first LLM request.
+    override = os.getenv("HARNESS_LLAMA_SERVER_BIN")
+    candidates = []
+    if override:
+        candidates.append((override, False))
+    else:
+        path_server = shutil.which("llama-server")
+        if path_server:
+            candidates.append((path_server, False))
+        bundled_server = "/usr/local/lib/ollama/llama-server"
+        if (os.path.isfile(bundled_server)
+                and os.access(bundled_server, os.X_OK)
+                and os.path.realpath(path_server or "") != os.path.realpath(bundled_server)):
+            candidates.append((bundled_server, True))
+
+    if not candidates:
+        spinner.__exit__(None, None, None)
+        raise RuntimeError(
+            "llama-server was not found. Install llama.cpp or set "
+            "HARNESS_LLAMA_SERVER_BIN to its executable path."
+        )
+
+    failures = []
+    for server_bin, cpu_only in candidates:
+        # The bundled Ollama server is usable without CUDA. Explicitly avoid
+        # requesting GPU layers for it; this also makes the fallback portable.
+        gpu_layers = "0" if cpu_only else "999"
+        cmd = [
+            server_bin,
+            "-m", model_path,
+            "-ngl", gpu_layers,
+            "--ctx-size", str(MODEL_CTX),
+            "-ctk", "q8_0",
+            "-ctv", "q8_0",
+            "--host", "0.0.0.0",
+            "--port", "8000"
+        ]
+        log_mode = "w" if not failures else "a"
+        log_file = open(log_path, log_mode)
+        log_file.write(f"Starting: {' '.join(cmd)}\n")
+        log_file.flush()
+
+        try:
+            launch_env = None
+            cuda12_dir = "/usr/local/lib/ollama/cuda_v12"
+            if not cpu_only and os.path.isdir(cuda12_dir):
+                # The local llama.cpp build is linked against CUDA 12, while
+                # this host's default CUDA installation is version 13.
+                # Ollama already provides the compatible runtime libraries.
+                launch_env = os.environ.copy()
+                old_library_path = launch_env.get("LD_LIBRARY_PATH", "")
+                launch_env["LD_LIBRARY_PATH"] = os.pathsep.join(
+                    part for part in (cuda12_dir, old_library_path) if part
+                )
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=launch_env,
+            )
+        except OSError as exc:
+            log_file.close()
+            failures.append(f"{server_bin}: {exc}")
+            continue
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                req = urllib.request.Request(f"{server_url}/v1/models")
+                with urllib.request.urlopen(req, timeout=1):
+                    spinner.__exit__(None, None, None)
+
+                    def cleanup(process=process, log_file=log_file):
+                        with Spinner("Shutting down llama-server..."):
+                            if process.poll() is None:
+                                process.terminate()
+                                try:
+                                    process.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    process.kill()
+                            log_file.close()
+
+                    atexit.register(cleanup)
+                    return process
+            except Exception:
+                if process.poll() is not None:
+                    break
+                time.sleep(1)
+
+        return_code = process.poll()
+        if return_code is None:
             process.terminate()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-            log_file.close()
-    
-    atexit.register(cleanup)
-    
-    # Wait for server to be ready
-    for _ in range(30):
-        try:
-            req = urllib.request.Request("http://localhost:8000/v1/models")
-            with urllib.request.urlopen(req, timeout=1):
-                spinner.__exit__(None, None, None)
-                return process
-        except Exception:
-            time.sleep(1)
-    
+                process.wait()
+            failures.append(f"{server_bin}: timed out after {timeout:g}s")
+        else:
+            failures.append(f"{server_bin}: exited with code {return_code}")
+        log_file.close()
+
     spinner.__exit__(None, None, None)
-    print("\033[91mWarning: llama-server did not start in time.\033[0m")
-    return process
+    try:
+        with open(log_path, "r") as log_file:
+            log_tail = "".join(log_file.readlines()[-12:]).strip()
+    except OSError:
+        log_tail = "(server log unavailable)"
+    raise RuntimeError(
+        "llama-server could not be started. "
+        + "; ".join(failures)
+        + f"\nSee {log_path} for details.\n{log_tail}"
+    )
 
 # Convert LangChain message history to OpenAI message schema format
 def _convert_messages_to_openai(messages):
