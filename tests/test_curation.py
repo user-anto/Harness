@@ -30,7 +30,7 @@ class BlockingExtractor:
         pass
 
 
-@pytest.mark.parametrize("text,expected", [("I like Python", True), ("hi", True), ("> quoted", False),
+@pytest.mark.parametrize("text,expected", [("I like Python", True), ("> quoted", False),
     ("```python\nprint('hello')\n```", False), ("my password is SuperSecret123", False), ("", False)])
 def test_turn_eligibility_is_code_enforced(text, expected):
     assert eligible_turn(text) is expected
@@ -49,9 +49,12 @@ def test_cpu_ollama_request_uses_schema_and_its_own_context(settings):
         return httpx.Response(200, text=json.dumps({"message": {"content": '{"candidates": []}'},
             "done": True, "done_reason": "stop", "prompt_eval_count": 300, "eval_count": 6}) + "\n")
 
-    extractor = OllamaExtractor(settings, client=httpx.Client(base_url=settings.memory_server_url,
-                                                             transport=httpx.MockTransport(handler)))
+    extractor = OllamaExtractor(settings)
     try:
+        assert extractor.client.timeout.read == settings.memory_timeout
+        assert extractor.client.timeout.connect == 5
+        extractor.client.close()
+        extractor.client = httpx.Client(base_url=settings.memory_server_url, transport=httpx.MockTransport(handler))
         result, turns = extractor.extract([{"id": "u1", "content": "I live in Pune."}], lambda: False)
         assert result == [] and turns[0]["id"] == "u1"
         payload = requests[-1][1]
@@ -95,18 +98,6 @@ def test_cloud_request_sends_final_reply_without_tools_and_uses_prompt_json(sett
         assert "secret_tool" not in str(payload)
     finally:
         extractor.close()
-
-
-def test_assistant_reply_cannot_supply_memory_evidence(settings):
-    memory = MemoryStore(settings.state_dir / "memory", embed)
-    try:
-        turn = {"id": "u1", "content": "What language should I learn?", "assistant_reply": "You use Python."}
-        proposed = candidate(turn, "The user uses Python.")
-        proposed["evidence"][0]["quote"] = "You use Python."
-        assert memory.save_candidates([proposed], [turn], str(settings.workspace)) == []
-        assert memory.records() == []
-    finally:
-        memory.close()
 
 
 def test_runtime_queues_only_final_answer_after_a_tool_loop(settings):
@@ -172,28 +163,6 @@ def test_reply_is_redacted_and_budgeted_before_cloud_transmission(settings):
         extractor.close()
 
 
-def test_background_curation_does_not_delay_the_next_turn(settings):
-    memory = MemoryStore(settings.state_dir / "memory", embed)
-    extractor = BlockingExtractor()
-    curator = MemoryCurator(settings, memory, extractor=extractor)
-    backend = FakeBackend(["First answer", "Second answer"])
-    runtime = AgentRuntime(settings, backend, memory=memory, curator=curator)
-    try:
-        assert runtime.turn("I prefer concise answers") == "First answer"
-        assert extractor.started.wait(2)
-        assert not extractor.release.is_set()
-        assert runtime.turn("I prefer brief answers") == "Second answer"
-        assert len(backend.requests) == 2
-        extractor.release.set()
-        assert curator.wait_idle(3)
-        assert len(memory.records()) == 1
-        assert curator.path.stat().st_mode & 0o777 == 0o600
-    finally:
-        extractor.release.set()
-        runtime.close()
-        memory.close()
-
-
 def test_forget_cancels_inflight_memory_so_it_cannot_reappear(settings):
     memory = MemoryStore(settings.state_dir / "memory", embed)
     record = memory.save("The user prefers concise answers.", "user_stated",
@@ -221,6 +190,7 @@ def test_unfinished_job_survives_restart_without_late_commit(settings):
     curator = MemoryCurator(settings, memory, extractor=first)
     curator.submit([{"id": "u1", "content": "I prefer concise answers"}], "u1", str(settings.workspace))
     assert first.started.wait(2)
+    assert curator.path.stat().st_mode & 0o777 == 0o600
     curator.close()
     assert len(json.loads(curator.path.read_text())) == 1
     first.release.set()
@@ -328,34 +298,172 @@ def test_greeting_never_loads_the_cpu_model(settings):
         extractor.close()
 
 
-def test_cpu_read_timeout_allows_cold_start(settings):
-    extractor = OllamaExtractor(settings)
+@pytest.mark.parametrize("failure", ["connect", "timeout", "status", "missing", "stream", "invalid"])
+def test_cloud_failures_use_local_cpu_fallback_with_same_evidence(settings, failure):
+    requests, events = [], []
+    class Audit:
+        def log(self, kind, payload):
+            events.append((kind, payload))
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        cloud = body["model"] == settings.memory_model
+        if request.url.path == "/api/show":
+            return httpx.Response(404 if cloud and failure == "missing" else 200, json={})
+        if cloud:
+            if failure == "connect":
+                raise httpx.ConnectError("offline", request=request)
+            if failure == "timeout":
+                raise httpx.ReadTimeout("slow cloud", request=request)
+            if failure == "status":
+                return httpx.Response(503, json={"error": "unavailable"})
+            if failure == "stream":
+                return httpx.Response(200, text=json.dumps({"error": "cloud unavailable"}) + "\n")
+            return httpx.Response(200, text=json.dumps({"done": True,
+                "message": {"content": '{"candidates": ['}}) + "\n")
+        supplied = json.loads(body["messages"][1]["content"])
+        record = candidate(supplied[-1])
+        return httpx.Response(200, text=json.dumps({"done": True,
+            "message": {"content": json.dumps({"candidates": [record]})}}) + "\n")
+
+    extractor = OllamaExtractor(settings, client=httpx.Client(base_url=settings.memory_server_url,
+        transport=httpx.MockTransport(handler)))
+    turn = {"id": "u1", "content": "I prefer concise answers", "assistant_reply": "Understood."}
     try:
-        assert extractor.client.timeout.read == 120
-        assert extractor.client.timeout.connect == 5
+        records, evidence = extractor.extract([turn], lambda: False, Audit())
+        assert records == [candidate(turn)] and evidence == [turn]
+        assert extractor.last_model == "llama3.2:3b"
+        payload = requests[-1][1]
+        assert payload["options"]["num_gpu"] == 0 and payload["options"]["num_thread"] == 2
+        assert payload["keep_alive"] == "10m" and "format" in payload and "think" not in payload
+        assert events[-2][0] == "memory_context" and any(e[0] == "memory_fallback" for e in events)
     finally:
         extractor.close()
 
 
-def test_timeout_retries_once_without_blocking_chat_or_looping_forever(settings):
-    class Extractor:
-        calls = 0
+def test_fallback_cooldown_and_cloud_recovery(settings, monkeypatch):
+    clock, cloud_calls = [100.0], []
+    monkeypatch.setattr("harness.curation.time.monotonic", lambda: clock[0])
 
-        def extract(self, turns, stopped, audit=None):
-            self.calls += 1
-            raise httpx.ReadTimeout("simulated CPU warmup timeout")
+    def handler(request):
+        body = json.loads(request.content)
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={})
+        if body["model"] == settings.memory_model:
+            cloud_calls.append(clock[0])
+            if len(cloud_calls) == 1:
+                return httpx.Response(503)
+        return httpx.Response(200, text=json.dumps({"done": True,
+            "message": {"content": '{"candidates": []}'}}) + "\n")
 
-        def close(self):
-            pass
+    extractor = OllamaExtractor(settings, client=httpx.Client(base_url=settings.memory_server_url,
+        transport=httpx.MockTransport(handler)))
+    try:
+        turns = [{"id": "u1", "content": "I live in Pune."}]
+        extractor.extract(turns, lambda: False)
+        assert extractor.last_model == settings.memory_fallback_model
+        clock[0] += 1
+        extractor.extract(turns, lambda: False)
+        assert cloud_calls == [100.0]
+        clock[0] += settings.memory_cloud_retry_interval
+        extractor.extract(turns, lambda: False)
+        assert cloud_calls == [100.0, 161.0]
+        assert extractor.last_model == settings.memory_model
+    finally:
+        extractor.close()
 
+
+def test_cancelled_cloud_failure_never_starts_fallback(settings):
+    stopped, requests = threading.Event(), []
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body["model"])
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={})
+        stopped.set()
+        raise httpx.ConnectError("offline", request=request)
+    extractor = OllamaExtractor(settings, client=httpx.Client(base_url=settings.memory_server_url,
+        transport=httpx.MockTransport(handler)))
+    try:
+        assert extractor.extract([{"id": "u1", "content": "I live in Pune."}], stopped.is_set) == ([], [])
+        assert settings.memory_fallback_model not in requests
+    finally:
+        extractor.close()
+
+
+def test_cloud_and_missing_local_fallback_report_failure_without_saving(settings):
+    def handler(request):
+        return httpx.Response(404, json={"error": "model missing"})
     memory = MemoryStore(settings.state_dir / "memory", embed)
-    extractor = Extractor()
+    extractor = OllamaExtractor(settings, client=httpx.Client(base_url=settings.memory_server_url,
+        transport=httpx.MockTransport(handler)))
     messages = []
     curator = MemoryCurator(settings, memory, extractor=extractor, on_activity=messages.append)
     try:
-        curator.submit([{"id": "u1", "content": "I prefer concise answers"}], "u1", "workspace")
+        curator.submit([{"id": "u1", "content": "I live in Pune."}], "u1", str(settings.workspace))
         assert curator.wait_idle(3)
-        assert extractor.calls == 2
+        assert memory.records() == []
+        assert any("local fallback llama3.2:3b failed" in message for message in messages)
+        assert any("ollama pull llama3.2:3b" in message for message in messages)
+    finally:
+        curator.close()
+        memory.close()
+
+
+def test_fallback_cannot_silently_resolve_to_remote_model(settings):
+    chats = []
+    def handler(request):
+        body = json.loads(request.content)
+        if body["model"] == settings.memory_model:
+            return httpx.Response(503)
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"remote_host": "https://example.invalid"})
+        chats.append(body)
+        return httpx.Response(200)
+    extractor = OllamaExtractor(settings, client=httpx.Client(base_url=settings.memory_server_url,
+        transport=httpx.MockTransport(handler)))
+    try:
+        with pytest.raises(ValueError, match="resolves to a cloud model"):
+            extractor.extract([{"id": "u1", "content": "I live in Pune."}], lambda: False)
+        assert not chats
+    finally:
+        extractor.close()
+
+
+def test_fallback_can_be_disabled_and_cloud_fallback_names_are_rejected(settings):
+    with pytest.raises(ValueError, match="local model"):
+        replace(settings, memory_fallback_model="another:cloud")
+    extractor = OllamaExtractor(replace(settings, memory_fallback_model=""),
+        client=httpx.Client(base_url=settings.memory_server_url,
+            transport=httpx.MockTransport(lambda request: httpx.Response(503))))
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            extractor.extract([{"id": "u1", "content": "I live in Pune."}], lambda: False)
+        assert extractor._fallback is None
+    finally:
+        extractor.close()
+
+
+def test_local_fallback_timeout_preserves_one_background_job_retry(settings):
+    chats = []
+    def handler(request):
+        body = json.loads(request.content)
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={})
+        chats.append(body["model"])
+        if body["model"] == settings.memory_model:
+            return httpx.Response(503)
+        raise httpx.ReadTimeout("local cold start", request=request)
+    memory = MemoryStore(settings.state_dir / "memory", embed)
+    extractor = OllamaExtractor(settings, client=httpx.Client(base_url=settings.memory_server_url,
+        transport=httpx.MockTransport(handler)))
+    messages = []
+    curator = MemoryCurator(settings, memory, extractor=extractor, on_activity=messages.append)
+    try:
+        curator.submit([{"id": "u1", "content": "I live in Pune."}], "u1", str(settings.workspace))
+        assert curator.wait_idle(3)
+        assert chats == [settings.memory_model, settings.memory_fallback_model, settings.memory_fallback_model]
         assert any("retrying once" in message for message in messages)
         assert any("unavailable" in message for message in messages)
         assert memory.records() == []

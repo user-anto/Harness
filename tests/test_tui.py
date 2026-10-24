@@ -90,6 +90,7 @@ def test_slash_menu_arrows_insert_command_before_submission():
             keyboard.send_text("I prefer concise answers.\r")
             assert await task == 0
             assert received == ["/remember I prefer concise answers."]
+            assert "\033[32m› /remember I prefer concise answers.\033[0m" in ui.transcript
 
     asyncio.run(scenario())
 
@@ -269,26 +270,6 @@ def test_mouse_wheel_scrolls_conversation_without_changing_input_or_snapping_bac
     asyncio.run(scenario())
 
 
-def test_background_indicator_does_not_disable_the_composer():
-    async def scenario():
-        with create_pipe_input() as keyboard:
-            ui = ChatUI(input=keyboard, output=DummyOutput())
-
-            def worker():
-                ui.background("Curating memory in background…")
-                assert ui.read_prompt() == "Next request"
-                return 0
-
-            task = asyncio.create_task(ui.run_async(worker))
-            await wait_until(lambda: not ui.busy)
-            assert "Curating memory in background" in ui.footer_fragments()[0][1]
-            assert not ui.composer.buffer.read_only()
-            keyboard.send_text("Next request\r")
-            assert await task == 0
-
-    asyncio.run(scenario())
-
-
 def test_cli_accepts_second_prompt_while_separate_curator_is_running(settings, monkeypatch):
     from harness.memory import MemoryStore
     from conftest import embed
@@ -327,6 +308,8 @@ def test_cli_accepts_second_prompt_while_separate_curator_is_running(settings, m
             keyboard.send_text("hello\r")
             await wait_until(lambda: started.is_set() and not ui.busy)
             assert not release.is_set()
+            assert "Curating memory in background" in ui.footer_fragments()[0][1]
+            assert not ui.composer.buffer.read_only()
             keyboard.send_text("next question\r")
             await wait_until(lambda: "Second answer" in ui.transcript and not ui.busy)
             assert not release.is_set() and len(backend.requests) == 2

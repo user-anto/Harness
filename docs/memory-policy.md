@@ -30,6 +30,8 @@ flowchart LR
   User[Recent user turns] --> Runtime[Harness runtime]
   Runtime --> Queue[Durable background queue]
   Queue -->|User excerpts and final reply| Model[Ollama Cloud gpt-oss:20b-cloud]
+  Model -->|Unavailable or invalid output| Fallback[Local llama3.2:3b on CPU]
+  Fallback -->|Candidate JSON and self-rated scores| Validate
   Model -->|Candidate JSON and self-rated scores| Validate[Deterministic evidence and policy checks]
   Validate -->|Accepted statements| Embed[Local Ollama embedding model]
   Embed --> Qdrant[Local curated Qdrant collection]
@@ -56,14 +58,46 @@ whole turns, shortens the assistant reply, then shortens the newest user excerpt
 if necessary, and logs actual server
 usage. That bound is not presented as an exact token count. The main model's exact
 token counting is unchanged. Cut-off or malformed JSON is never repaired into facts or
-partially saved. If neither attempt succeeds, the answer remains available and the
-CLI activity footer reports that memory curation is unavailable.
+partially saved. If cloud attempts fail, the configured local fallback processes the
+same exchange; neither model's partial output is committed. If fallback also fails,
+the answer remains available and the activity footer reports the curation failure.
 
 `memory_timeout` defaults to 120 seconds for the HTTP read timeout and streamed
 generation deadline. A timed-out job is retried once in the background, then reported
 as unavailable; this does not block the next prompt. `memory_keep_alive: 10m` is sent
 on every call. Cloud residency is provider controlled; this does not promise fixed
 loading latency. Local CPU models still use `memory_threads` and `num_gpu: 0`.
+
+### Automatic local fallback
+
+`memory_fallback_model` defaults to `llama3.2:3b`. Pull it beforehand with
+`ollama pull llama3.2:3b`; Harness never downloads it automatically. When a cloud
+extractor fails registration, transport, authentication, generation, or JSON validation,
+the adapter tries this local model for the same exchange. An empty candidate list alone is a valid response, not an availability failure.
+A missing expected research note instead enters the focused recovery path below. Model failures do not change acceptance
+thresholds, evidence matching, secret filtering, or the main agent model.
+
+Local requests use native schema constraints, `num_gpu: 0`, the configured
+`memory_threads` (default 2), and the same context/keep-alive settings. Remote-model
+metadata is rejected for the fallback, even if the configured alias looks local.
+`memory_fallback_model: ""` disables the feature. A deliberately local primary
+curator does not invoke the cloud-to-local fallback path.
+
+After cloud failure, subsequent jobs use local fallback until
+`memory_cloud_retry_interval` seconds have elapsed (default 60). The next eligible
+job then retries the primary; a successful primary response restores normal cloud
+use. This cooldown is process-local, not a scheduled health probe. Detecting the
+initial failure still depends on the configured HTTP timeout/deadline. Each model
+has its own generation deadline, so a job that switches models can take longer
+than one `memory_timeout` interval. The local
+Ollama service is shared by both models, so a stopped service prevents both paths.
+
+`memory_fallback` audit events record model identities and the exception category,
+without copying failed output. Context/generation events identify the model used;
+accepted background writes record the actual successful extractor model. Stale or
+cancelled jobs do not begin fallback or save its results. If both models fail,
+no new candidates from that job are saved. Underlying memory/embedding failures
+are separate from extractor fallback.
 
 Pending jobs are atomically saved in `<state_dir>/curation-pending.json` with mode
 0600 and resumed on restart. Jobs expire according to session retention. The queue
@@ -72,6 +106,55 @@ audit event and activity notice. `/remember` saves immediately instead of enteri
 this queue. Forgetting memory or clearing context invalidates older jobs, including
 an in-flight result; a stale worker cannot commit those memories later. Graceful
 exit stops further commits and leaves unfinished valid jobs for the next launch.
+
+## Missing answer notes and rejection diagnostics
+
+A parsed JSON response is not proof that a memory was saved. Every background batch
+now records `memory_selection` with candidate, accepted and rejected counts, including
+an explicit `empty_candidates` or `all_rejected` outcome. Rejected candidates produce
+`memory_candidate_rejected` events with fixed field paths and reason codes such as
+`below_threshold`, `assistant_quote_or_turn_mismatch`, `assistant_personal_guess`, or
+`two_distinct_turns_required`. Schema failures also include field-level errors and the
+opaque source turn ID. These events exclude raw statements, quotes and unknown keys.
+
+If no accepted answer note accompanies a substantive final answer, the worker performs
+one focused recovery pass per job attempt. This conservative trigger requires at
+least 200 characters and 35 words of answer content, and excludes known sensitive
+content, personal guesses, short acknowledgements, refusals/tool failures and memory
+status messages. It is a retry heuristic, not a decision to save or verify a claim.
+Short useful notes can still be accepted by the normal extractor.
+
+The recovery prompt asks for one concise historical note and a numbered excerpt
+selection, preserving uncertainty. Up to six exact source slices (200 characters
+each) are supplied, with uncertainty/candidate passages prioritized. The model emits
+only a statement, confidence, and `evidence_id`. Code binds the exact quote, latest
+turn ID, `answer_note` kind, and a stable exchange key. Unknown excerpt IDs are
+rejected; quotes and opaque UUIDs no longer need to be copied by the model. The
+statement must still pass the normal policy checks. Source matching alone does not
+prove entailment or factual truth.
+
+The focused prompt omits unrelated user-profile instructions to leave room for the
+answer. Each model gets one 1,024-token recovery attempt. An empty or policy-rejected cloud recovery counts as a failure and can use
+the configured local fallback, even when the initial cloud response was valid JSON.
+The same confidence, evidence, secret and personal-claim checks apply throughout.
+Accepted user facts from the initial pass remain saved and are not resubmitted as
+part of note recovery. Dates and locally captured source references are retained.
+
+`memory_note_retry` records why recovery started. Recovery still runs in the background
+and obeys invalidation/shutdown checks. If no note passes after the bounded attempts,
+the activity footer reports that the research answer note was not saved; successful
+JSON alone no longer hides that outcome. Existing timeout retry limits still apply.
+The synchronous path also records rejection diagnostics and can use its remaining
+second extraction attempt with the same numbered-source recovery format; it does not call the Ollama fallback.
+
+## Explicit note length
+
+`/remember` stores the full supplied text without an LLM summarization step. Explicit
+notes and edits to them accept up to 16,000 characters; automatically generated
+statements retain their 1,000-character limit. Over-limit errors report the limit
+and supplied length. Secret filtering still checks the entire statement and evidence.
+Large notes remain subject to the normal recall/context budget; the full record is
+available in the Memories details view and through `read_memory`.
 
 ## Confidence and acceptance
 
@@ -205,3 +288,27 @@ before commit. Changed, deleted or superseded records cannot be overwritten by a
 stale edit. Pending automatic curation is invalidated when an edit starts; the edit
 exchange does not enter automatic extraction. Edit authority expires when that
 agent turn ends. File and command tools keep their existing approval policies.
+
+
+## Which fields are generated by the model?
+
+For automatic extraction, the model proposes `statement`, `fact_key`, `kind`,
+`confidence`, and `evidence` entries selecting `turn_id` and `quote`. IDs and quotes
+must refer to supplied evidence; selecting them is model work, but their values
+must be copied, not invented. Harness can canonicalize a proposed fact key, prefixes
+answer-note keys, enforces kind/score/evidence rules, and caps tentative scores.
+
+Harness supplies UUID, schema version, workspace, created/updated timestamps,
+status, embedding-model identity, expiry, superseding links, note verification and
+revalidation markers, observed date, recorded user prompt, captured source URLs,
+and edit history. Embedding vectors come from the embedding model separately.
+Explicit `/remember` uses the user's statement directly, deterministic kind/key
+rules and confidence 1.0; no extraction model is required. An agent-requested edit
+can generate a revised statement, while Harness preserves its ID and records edit
+request evidence.
+
+Validation failures now distinguish incomplete stream, output limit, malformed
+JSON, invalid envelope/list and invalid candidate fields in audit metadata, without
+saving raw response content. A retry requests one concise candidate and includes
+the failure category. Complete Markdown-fenced JSON can be unwrapped; malformed,
+truncated or partially invalid candidate batches remain rejected.

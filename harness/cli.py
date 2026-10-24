@@ -10,6 +10,7 @@ import sys
 from . import __version__
 from .config import load_settings
 from .commands import COMMANDS, command_help
+from .cancellation import TurnInterrupted
 
 
 def parser():
@@ -38,7 +39,8 @@ def doctor(settings, probe=False):
               "state_dir": str(settings.state_dir), "model_file": str(Path(settings.model).expanduser()),
               "model_exists": bool(settings.model) and Path(settings.model).expanduser().is_file(),
               "llama_server": binary, "ollama": shutil.which("ollama"),
-              "input_budget": settings.input_budget, "memory_enabled": settings.memory_enabled}
+              "input_budget": settings.input_budget, "memory_enabled": settings.memory_enabled,
+              "memory_model": settings.memory_model, "memory_fallback_model": settings.memory_fallback_model}
     from .credentials import ollama_api_key
     report["web_search_key_available"] = bool(ollama_api_key(settings))
     if probe:
@@ -84,10 +86,13 @@ def chat(args, settings, ui):
         ui.status("startup")
         settings = manager.start()
         backend = LlamaBackend(settings)
+        if hasattr(ui, "on_interrupt"):
+            ui.on_interrupt = getattr(backend, "cancel", lambda: None)
         backend.on_reasoning = ui.reasoning if settings.show_reasoning else None
         memory = open_memory(settings) if settings.memory_enabled else None
         runtime = AgentRuntime(settings, backend, memory=memory, approve=ui.approve,
-                               on_text=ui.write, on_status=ui.status, on_answer=ui.answer)
+                               on_text=ui.write, on_status=ui.status, on_answer=ui.answer,
+                               check_cancelled=getattr(ui, "_check_cancelled", None))
         if memory and settings.memory_background:
             from .curation import MemoryCurator
             runtime.curator = MemoryCurator(settings, memory, audit=runtime.audit, on_activity=ui.background)
@@ -99,7 +104,8 @@ def chat(args, settings, ui):
             ui.message("New session. Global memories may still be recalled.")
         ui.message(f"GPU layers (requested): {settings.gpu_layers} | input budget: {settings.input_budget:,} tokens")
         if memory and settings.memory_background:
-            ui.message(f"Memory curation: {settings.memory_model} | keep-alive requested: {settings.memory_keep_alive}")
+            ui.message(f"Memory curation: {settings.memory_model} | local fallback: {settings.memory_fallback_model or 'disabled'}"
+                       f" | keep-alive requested: {settings.memory_keep_alive}")
         if settings.gpu_layers == 0:
             ui.message("CPU execution selected (gpu_layers: 0). Set gpu_layers: auto to enable GPU fitting.")
         ui.message("Approved shell commands run on the host, unsandboxed. Each write and command requires its own approval.")
@@ -116,6 +122,8 @@ def chat(args, settings, ui):
                     break
                 continue
             try:
+                if hasattr(backend, "reset_cancel"):
+                    backend.reset_cancel()
                 ui.begin_turn()
                 command = next((item for item in COMMANDS if item.name == prompt.strip()), None)
                 if (prompt.strip() == "/memories" or prompt.startswith("/memories ")) and hasattr(ui, "browse_memories"):
@@ -134,6 +142,11 @@ def chat(args, settings, ui):
                         ui.answer(answer)
                     for warning in runtime.warnings:
                         ui.message(warning)
+            except TurnInterrupted:
+                if hasattr(ui, "turn_cancelled"):
+                    ui.turn_cancelled.clear()
+                ui.begin_turn()
+                ui.message("Turn interrupted. Session kept open. Completed actions are not undone.")
             except Exception as exc:
                 ui.close()
                 ui.message(f"Request failed: {exc}")

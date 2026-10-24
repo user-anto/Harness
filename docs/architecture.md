@@ -26,10 +26,17 @@
    does not have a complete semantic contradiction guarantee.
    The interactive CLI injects a bounded, durable `MemoryCurator` worker using local
    Ollama's `gpt-oss:20b-cloud` through the local API, independently of the main
-   llama-server, requesting a ten-minute keep-alive. Qdrant calls
+   llama-server, requesting a ten-minute keep-alive. Cloud failures automatically try
+   the CPU-only `llama3.2:3b` fallback with the same validation/evidence policy.
+   A 60-second cooldown prevents every queued job from waiting on a failed cloud
+   request, and the next eligible job after cooldown retries the cloud. Qdrant calls
    are serialized; embedding requests run outside the database lock. Commit guards
    prevent invalidated jobs from restoring forgotten memories. Explicit saves stay
-   synchronous. Programmatic/evaluation runtimes without an injected curator retain
+   synchronous. Parsed extraction JSON and policy acceptance are distinct outcomes:
+   fixed rejection codes explain rejected candidates, and a missing substantive
+   answer note triggers a bounded focused retry with local fallback. This recovery
+   never lowers evidence or confidence requirements and leaves accepted facts intact.
+   Programmatic/evaluation runtimes without an injected curator retain
    the synchronous extraction path.
    Automatic extraction sends the newest user/final-answer pair and at most one related earlier
    excerpt; eight recent eligible turns form the local selection pool. Simple
@@ -108,3 +115,17 @@ JSON remains available through the details pane and `harness memory export`;
 standalone deletion uses `harness memory forget ID`.
 
 See [development and CI](development.md) for the source map and verification gates.
+
+
+## Rendering and interruption
+
+The terminal caches wrapped logical lines (including ANSI carry), search strings,
+and browser layout; UIContent retrieves visible card lines rather than building
+all fragments on every selection. Context diagnostic counts use a bounded
+content-keyed cache; the complete request is still counted before generation.
+
+Production main-model HTTP runs on a backend-owned asyncio loop behind the same
+synchronous interface. Cancelling its active task closes the request even while
+waiting for response headers. `TurnInterrupted` is recoverable in the chat loop;
+a distinct per-turn event leaves the process/session shutdown flag unset. Runtime
+checks before model work and each new tool call prevent scheduling more actions.

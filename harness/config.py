@@ -27,6 +27,8 @@ class Settings:
     memory_enabled: bool = True
     memory_background: bool = True
     memory_model: str = "gpt-oss:20b-cloud"
+    memory_fallback_model: str = "llama3.2:3b"
+    memory_cloud_retry_interval: float = 60.0
     memory_keep_alive: str = "10m"
     memory_server_url: str = "http://127.0.0.1:11434"
     memory_context: int = 8192
@@ -56,6 +58,11 @@ class Settings:
                 or memory_url.username or memory_url.password or memory_url.path not in {"", "/"}
                 or memory_url.query or memory_url.fragment):
             raise ValueError("memory_server_url must be an HTTP loopback origin without credentials")
+        if (not isinstance(self.memory_fallback_model, str)
+                or self.memory_fallback_model.endswith(("-cloud", ":cloud"))):
+            raise ValueError("memory_fallback_model must name a local model, or be empty to disable fallback")
+        if self.memory_cloud_retry_interval <= 0:
+            raise ValueError("memory_cloud_retry_interval must be positive")
         if self.memory_context < 4096 or self.memory_threads < 1 or self.memory_timeout <= 0:
             raise ValueError("memory_context must be at least 4096; memory_threads and memory_timeout must be positive")
         import re

@@ -153,22 +153,6 @@ def test_ollama_server_hash_identity_uses_exact_model_path(settings):
         ServerManager(settings)._verify(client)
 
 
-def test_streaming_discards_reasoning_preserves_usage_and_tool_args(settings):
-    chunks = [{"choices": [{"delta": {"reasoning_content": "private chain of thought"}}]},
-              {"choices": [{"delta": {"content": "Answer"}}]},
-              {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}}]
-    data = "".join("data: " + json.dumps(c) + "\n\n" for c in chunks) + "data: [DONE]\n\n"
-    backend = LlamaBackend(settings, client=httpx.Client(base_url="http://local", transport=httpx.MockTransport(
-        lambda request: httpx.Response(200, text=data))))
-    seen = []
-    try:
-        response, usage = backend.complete({"messages": []}, on_text=seen.append)
-        assert seen == ["Answer"] and "private" not in json.dumps(response)
-        assert usage["completion_tokens"] == 10 and usage["total_tokens"] == 30
-    finally:
-        backend.close()
-
-
 def test_backend_preserves_output_limit_finish_reason(settings):
     backend = LlamaBackend(settings, client=httpx.Client(base_url="http://local", transport=httpx.MockTransport(
         lambda request: httpx.Response(200, json={"choices": [{"finish_reason": "length",
@@ -183,17 +167,27 @@ def test_backend_preserves_output_limit_finish_reason(settings):
         backend.close()
 
 
-def test_reasoning_stream_has_a_separate_callback_and_is_not_saved_in_message(settings):
+def test_streaming_separates_reasoning_and_preserves_text_tool_arguments_and_usage(settings):
     chunks = [{"choices": [{"delta": {"reasoning_content": "Check units first."}}]},
-              {"choices": [{"delta": {"content": "42"}}]}]
+              {"choices": [{"delta": {"content": "42"}}]},
+              {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1", "function": {
+                  "name": "read_file", "arguments": '{"path":'}}]}}]},
+              {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {
+                  "arguments": '"answer.py"}'}}]}}]},
+              {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}}]
     data = "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n"
     reasoning, answer = [], []
     backend = LlamaBackend(settings, on_reasoning=reasoning.append, client=httpx.Client(
         base_url="http://local", transport=httpx.MockTransport(lambda _: httpx.Response(200, text=data))))
     try:
-        message, _ = backend.complete({"messages": []}, on_text=answer.append)
+        message, usage = backend.complete({"messages": []}, on_text=answer.append)
         assert reasoning == ["Check units first."] and answer == ["42"]
-        assert message == {"role": "assistant", "content": "42"}
+        assert message["role"] == "assistant" and message["content"] == "42"
+        assert "Check units first." not in json.dumps(message)
+        call, = message["tool_calls"]
+        assert call["id"] == "call-1" and call["function"]["name"] == "read_file"
+        assert json.loads(call["function"]["arguments"]) == {"path": "answer.py"}
+        assert usage == {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
     finally:
         backend.close()
 

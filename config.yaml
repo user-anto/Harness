@@ -11,9 +11,13 @@ env_file: ""
 memory_enabled: true
 memory_background: true
 memory_model: "gpt-oss:20b-cloud"
+# Automatic CPU-only fallback; pull both models before enabling memory.
+memory_fallback_model: "llama3.2:3b"
+# Retry the cloud after this cooldown while local fallback serves queued jobs.
+memory_cloud_retry_interval: 60
 memory_keep_alive: "10m"
 memory_context: 8192
-# Used only if memory_model is changed to a local CPU model.
+# CPU threads for local curation, including automatic fallback.
 memory_threads: 2
 memory_timeout: 120
 show_reasoning: true

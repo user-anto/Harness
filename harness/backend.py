@@ -1,5 +1,7 @@
 """Local model transport and owned process lifecycle, without import side effects."""
 
+import asyncio
+import threading
 from dataclasses import replace
 import hashlib
 import json
@@ -14,6 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .cancellation import TurnInterrupted
 from .config import private_dir
 from .security import redact
 
@@ -21,12 +24,62 @@ from .security import redact
 class LlamaBackend:
     def __init__(self, settings, *, client=None, on_reasoning=None):
         self.settings = settings
-        self.client = client or httpx.Client(base_url=settings.server_url, timeout=120, trust_env=False)
+        self.client = client
         self._token_counts = {}
+        self._injected_client = client is not None
+        self._io_loop = None
+        self._async_client = None
+        self._active_task = None
+        self._task_lock = threading.Lock()
+        self._interrupt_requested = threading.Event()
         self.on_reasoning = on_reasoning
 
+    def reset_cancel(self):
+        self._interrupt_requested.clear()
+
+    def cancel(self):
+        self._interrupt_requested.set()
+        with self._task_lock:
+            if self._active_task is not None:
+                self._io_loop.call_soon_threadsafe(self._active_task.cancel)
+
+    def _run(self, coroutine):
+        if self._io_loop is None:
+            self._io_loop = asyncio.new_event_loop()
+        with self._task_lock:
+            if self._interrupt_requested.is_set():
+                coroutine.close()
+                raise TurnInterrupted()
+            task = self._io_loop.create_task(coroutine)
+            self._active_task = task
+        try:
+            return self._io_loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            raise TurnInterrupted() from None
+        finally:
+            with self._task_lock:
+                self._active_task = None
+
+    def _async_transport(self):
+        if self._async_client is None:
+            self._async_client = httpx.AsyncClient(base_url=self.settings.server_url, timeout=120, trust_env=False)
+        return self._async_client
+
+    async def _post_async(self, path, payload):
+        return await self._async_transport().post(path, json=payload)
+
+    def _post(self, path, payload):
+        if self._injected_client:
+            return self.client.post(path, json=payload)
+        return self._run(self._post_async(path, payload))
+
     def close(self):
-        self.client.close()
+        if self._async_client is not None:
+            self._io_loop.run_until_complete(self._async_client.aclose())
+        if self._io_loop is not None:
+            self._io_loop.close()
+        if self.client is not None:
+            self.client.close()
 
     def count_tokens(self, request):
         key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
@@ -39,16 +92,16 @@ class LlamaBackend:
         return count
 
     def _count_tokens(self, request):
-        response = self.client.post("/v1/chat/completions/input_tokens", json=request)
+        response = self._post("/v1/chat/completions/input_tokens", request)
         if response.status_code in {404, 405, 501}:
             # Older llama.cpp builds expose template application and tokenization.
             # They still count the rendered messages AND tools, never characters/4.
-            applied = self.client.post("/apply-template", json=request)
+            applied = self._post("/apply-template", request)
             applied.raise_for_status()
             prompt = applied.json().get("prompt")
             if not isinstance(prompt, str):
                 raise RuntimeError("Server cannot format complete requests for token counting; upgrade llama.cpp")
-            counted = self.client.post("/tokenize", json={"content": prompt, "add_special": True})
+            counted = self._post("/tokenize", {"content": prompt, "add_special": True})
             counted.raise_for_status()
             return len(counted.json()["tokens"])
         response.raise_for_status()
@@ -58,9 +111,10 @@ class LlamaBackend:
         return count
 
     def complete(self, request, on_text=None):
-        # Reasoning can be displayed through a separate callback, never stored as answer content.
+        if self._interrupt_requested.is_set():
+            raise TurnInterrupted()
         if on_text is None:
-            response = self.client.post("/v1/chat/completions", json={**request, "stream": False})
+            response = self._post("/v1/chat/completions", {**request, "stream": False})
             response.raise_for_status()
             body = response.json()
             choice = body["choices"][0]
@@ -71,36 +125,58 @@ class LlamaBackend:
             if choice.get("finish_reason"):
                 message["_finish_reason"] = choice["finish_reason"]
             return message, body.get("usage", {})
-        parts, calls, usage = [], {}, {}
-        with self.client.stream("POST", "/v1/chat/completions", json={**request, "stream": True,
-                                "stream_options": {"include_usage": True}}) as response:
+        payload = {**request, "stream": True, "stream_options": {"include_usage": True}}
+        state = {"parts": [], "calls": {}, "usage": {}}
+        if self._injected_client:
+            with self.client.stream("POST", "/v1/chat/completions", json=payload) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not self._stream_line(line, state, on_text):
+                        break
+        else:
+            self._run(self._stream_async(payload, state, on_text))
+        message = self._clean({"content": "".join(state["parts"]),
+                              "tool_calls": [state["calls"][k] for k in sorted(state["calls"])]})
+        if state.get("finish_reason"):
+            message["_finish_reason"] = state["finish_reason"]
+        return message, state["usage"]
+
+    async def _stream_async(self, payload, state, on_text):
+        async with self._async_transport().stream("POST", "/v1/chat/completions", json=payload) as response:
             response.raise_for_status()
-            for line in response.iter_lines():
-                if not line.startswith("data: "):
-                    continue
-                if line[6:] == "[DONE]":
+            async for line in response.aiter_lines():
+                if not self._stream_line(line, state, on_text):
                     break
-                chunk = json.loads(line[6:])
-                usage = chunk.get("usage") or usage
-                choices = chunk.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                if self.on_reasoning and reasoning:
-                    self.on_reasoning(reasoning)
-                if delta.get("content"):
-                    parts.append(delta["content"])
-                    on_text(delta["content"])
-                for call in delta.get("tool_calls", []):
-                    item = calls.setdefault(call["index"], {"id": "", "type": "function",
-                                                           "function": {"name": "", "arguments": ""}})
-                    if call.get("id"):
-                        item["id"] = call["id"]
-                    for key in ("name", "arguments"):
-                        item["function"][key] += call.get("function", {}).get(key) or ""
-        return self._clean({"role": "assistant", "content": "".join(parts),
-                            "tool_calls": [calls[k] for k in sorted(calls)]}), usage
+
+    def _stream_line(self, line, state, on_text):
+        if self._interrupt_requested.is_set():
+            raise TurnInterrupted()
+        if not line.startswith("data: "):
+            return True
+        if line[6:] == "[DONE]":
+            return False
+        chunk = json.loads(line[6:])
+        state["usage"] = chunk.get("usage") or state["usage"]
+        choices = chunk.get("choices", [])
+        if not choices:
+            return True
+        if choices[0].get("finish_reason"):
+            state["finish_reason"] = choices[0]["finish_reason"]
+        delta = choices[0].get("delta", {})
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+        if self.on_reasoning and reasoning:
+            self.on_reasoning(reasoning)
+        if delta.get("content"):
+            state["parts"].append(delta["content"])
+            on_text(delta["content"])
+        for call in delta.get("tool_calls", []):
+            item = state["calls"].setdefault(call["index"], {"id": "", "type": "function",
+                                                          "function": {"name": "", "arguments": ""}})
+            if call.get("id"):
+                item["id"] = call["id"]
+            for key in ("name", "arguments"):
+                item["function"][key] += call.get("function", {}).get(key) or ""
+        return True
 
     @staticmethod
     def _clean(message):

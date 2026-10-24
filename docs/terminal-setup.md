@@ -44,6 +44,16 @@ browser footers. Workspace paths are omitted from cards.
 New session names are shortened first-prompt titles, with no extra model request.
 Older sessions display `UNKNOWN`. IDs remain distinct and stable for `--session`.
 
+## Interrupting generation
+
+Esc during active generation or token-count HTTP work cancels the current turn,
+including waiting for response headers, and keeps the session open for another
+prompt. It is separate from the shutdown flag. Browser Esc still returns to chat;
+approval Esc still denies the operation. Cancellation stops later tool calls but
+does not undo completed writes/commands. An approved command already running can
+finish within its configured bounds. The next prompt recovers incomplete call
+outcomes without replaying them.
+
 ## Newlines
 
 Enter sends a prompt. Shift+Enter inserts a newline in the composer, and Ctrl+J

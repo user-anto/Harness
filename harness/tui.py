@@ -24,6 +24,7 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Box, TextArea
 
+from .cancellation import TurnInterrupted
 from .commands import COMMANDS
 from .ui import TerminalUI
 
@@ -83,10 +84,14 @@ class ChatUI(TerminalUI):
         super().__init__(stream=TranscriptStream(self), interactive=True)
         self.transcript = ""
         self.busy = True
+        self.turn_active = False
         self.approval_pending = False
         self.status_message = ""
         self.background_message = ""
         self.cancelled = threading.Event()
+        self.turn_cancelled = threading.Event()
+        self.on_interrupt = lambda: None
+        self._line_cache = {}
         self._requests = queue.Queue()
         self._approvals = queue.Queue()
         self._loop = None
@@ -195,6 +200,9 @@ class ChatUI(TerminalUI):
             return [("class:muted", " ↑/↓ choose · Enter/Tab insert · Esc close")]
         if self.selected_text():
             return [("class:muted", " Text selected · Ctrl+C copy · Esc clear · Wheel scroll ")]
+        if self.busy and self.turn_active:
+            suffix = " · " + self.background_message if self.background_message else ""
+            return [("class:muted", " Esc interrupt turn" + suffix)]
         if self.background_message:
             return [("class:muted", f" {self.background_message} · / commands")]
         return [("class:muted", " Enter send · Shift+Enter newline · Wheel/trackpad scroll · Press / for available commands ")]
@@ -209,29 +217,59 @@ class ChatUI(TerminalUI):
             return self.highlighted_transcript()
         if self._wrapped_key and width != self._wrapped_key[1]:
             self.clear_selection()
-        result = []
-        column, lines, offset = 0, 1, 0
-        self._soft_breaks = set()
-        for style, text, *_ in to_formatted_text(ANSI(self.transcript)):
-            fragment = ""
-            for char in text.expandtabs(4):
+        result, soft_breaks, cache = [], set(), {}
+        offset, lines, carry = 0, 1, ""
+        logical = self.transcript.split("\n")
+        for index, text in enumerate(logical):
+            text += "\n" if index < len(logical) - 1 else ""
+            key = (carry, text, width)
+            entry = self._line_cache.get(key)
+            if entry is None:
+                entry = self._wrap_logical_line(carry, text, width)
+            fragments, breaks, length, newlines, carry = entry
+            cache[key] = entry
+            result.extend(fragments)
+            soft_breaks.update(offset + point for point in breaks)
+            offset += length
+            lines += newlines
+        self._line_cache = cache
+        self._soft_breaks = soft_breaks
+        self._wrapped_key = (self.transcript, width)
+        self._wrapped, self._visual_line_count = result, lines
+        return self.highlighted_transcript()
+
+    @staticmethod
+    def _wrap_logical_line(carry, text, width):
+        result, breaks = [], set()
+        column, offset, newlines = 0, 0, 0
+        for style, content, *_ in to_formatted_text(ANSI(carry + text)):
+            fragment = []
+            for char in content.expandtabs(4):
                 size = get_cwidth(char)
                 if char != "\n" and column + size > width:
-                    self._soft_breaks.add(offset)
-                    fragment += "\n"
+                    breaks.add(offset)
+                    fragment.append("\n")
                     offset += 1
+                    newlines += 1
                     column = 0
-                    lines += 1
-                fragment += char
+                fragment.append(char)
                 offset += 1
                 if char == "\n":
                     column = 0
-                    lines += 1
+                    newlines += 1
                 else:
                     column += size
-            result.append((style, fragment))
-        self._wrapped_key, self._wrapped, self._visual_line_count = key, result, lines
-        return self.highlighted_transcript()
+            result.append((style, "".join(fragment)))
+        # Replay SGR state across logical lines, including multiline reasoning.
+        for sequence in re.findall(r"\x1b\[[0-9;]*m", text):
+            params = sequence[2:-1]
+            if not params or params == "0":
+                carry = ""
+            elif params.startswith("0;"):
+                carry = sequence
+            else:
+                carry += sequence
+        return result, breaks, offset, newlines, carry
 
     def selection_range(self):
         if self.selection_start is None or self.selection_end is None:
@@ -318,9 +356,17 @@ class ChatUI(TerminalUI):
         else:
             callback()
 
+    def interrupt_turn(self):
+        self.turn_cancelled.set()
+        self.on_interrupt()
+        self.status_message = "Interrupting current turn…"
+        self.app.invalidate()
+
     def _check_cancelled(self):
         if self.cancelled.is_set():
             raise KeyboardInterrupt
+        if self.turn_cancelled.is_set():
+            raise TurnInterrupted()
 
     def pause(self):
         self.dispatch(lambda: self._set_status(""))
@@ -390,6 +436,11 @@ class ChatUI(TerminalUI):
             return self.session_browser
         return None
 
+    def _submitted_prompt(self, text):
+        from .memory_view import safe_text
+        prompt = "› " + safe_text(text)
+        return f"\n\033[32m{prompt}\033[0m\n\n" if self.color else f"\n{prompt}\n\n"
+
     def show_session(self, session, state, previous, deleted=None):
         from .memory_view import safe_text
         if previous != deleted:
@@ -402,7 +453,7 @@ class ChatUI(TerminalUI):
             transcript = f"Session {safe_text(session)}\n"
             for message in state.get("messages", []):
                 if message['role'] == 'user':
-                    transcript += '\n› ' + safe_text(message.get('content', '')) + '\n\n'
+                    transcript += self._submitted_prompt(message.get('content', ''))
                 elif message['role'] == 'assistant' and not message.get('tool_calls'):
                     transcript += safe_text(message.get('content', '')) + '\n'
             draft = ''
@@ -467,9 +518,11 @@ class ChatUI(TerminalUI):
             self.dispatch(hide)
 
     def read_prompt(self):
+        self.turn_cancelled.clear()
         self._check_cancelled()
 
         def ready():
+            self.turn_active = False
             self.busy = False
             self.status_message = ""
             self.app.invalidate()
@@ -518,8 +571,9 @@ class ChatUI(TerminalUI):
             self.composer.buffer.append_to_history()
             self.composer.buffer.reset()
             self.busy = True
+            self.turn_active = True
             self._scroll_line = None
-            self.append(f"\n› {text}\n\n")
+            self.append(self._submitted_prompt(text))
             self._requests.put(text)
 
     def _resolve_approval(self, allowed):
@@ -558,6 +612,8 @@ class ChatUI(TerminalUI):
             self.clear_selection()
             if self.approval_pending:
                 self._resolve_approval(False)
+            elif self.busy and self.turn_active:
+                self.interrupt_turn()
             self._suppress_menu = True
 
         @bindings.add("c-j")

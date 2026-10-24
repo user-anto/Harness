@@ -12,9 +12,12 @@ from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, P
 
 from .config import private_dir
 from .security import contains_secret
+from .memory_policy import candidate_policy_errors
 
 COLLECTION = "harness_curated_v1"
 KINDS = {"explicit": 3, "user_stated": 2, "inferred": 1, "answer_note": 0}
+EXPLICIT_STATEMENT_LIMIT = 16000
+AUTOMATIC_STATEMENT_LIMIT = 1000
 
 
 def serialized(method):
@@ -85,8 +88,11 @@ class MemoryStore:
     def save(self, statement, kind, evidence, workspace, *, key=None, confidence=1.0, before_commit=None,
              sources=None, user_prompt="", observed_at=None):
         statement = statement.strip()
-        if not statement or len(statement) > 1000 or kind not in KINDS:
-            raise ValueError("Invalid memory statement or kind")
+        if kind not in KINDS:
+            raise ValueError("Invalid memory kind")
+        limit = EXPLICIT_STATEMENT_LIMIT if kind == "explicit" else AUTOMATIC_STATEMENT_LIMIT
+        if not statement or len(statement) > limit:
+            raise ValueError(f"Memory statements must contain 1–{limit:,} characters (received {len(statement):,})")
         if (contains_secret(statement) or "[REDACTED]" in statement or
                 any(contains_secret(e.get("quote", "")) or "[REDACTED]" in e.get("quote", "") for e in evidence)):
             raise ValueError("Credentials and secrets cannot be saved as memories")
@@ -176,63 +182,41 @@ class MemoryStore:
                                     points=[previous["id"]], wait=True)
         return record
 
-    def save_candidates(self, candidates, user_turns, workspace, *, before_commit=None, sources=None, observed_at=None):
-        """User facts need user quotes; historical answer notes need assistant quotes."""
-        lookup = {turn["id"]: turn["content"] for turn in user_turns}
-        if not lookup:
-            return []
-        newest = user_turns[-1]["id"]
+    def save_candidates(self, candidates, user_turns, workspace, *, before_commit=None, sources=None,
+                        observed_at=None, diagnostics=None):
+        """Validate candidates, recording fixed rejection codes without raw content."""
         saved = []
-        for candidate in candidates[:5]:
+        for index, candidate in enumerate(candidates[:5]):
+            errors = candidate_policy_errors(candidate, user_turns)
+            if not errors and candidate["kind"] == "answer_note" and any(r["kind"] == "answer_note" for r in saved):
+                errors = [{"field": "kind", "reason": "one_answer_note_per_exchange"}]
+            if errors:
+                if diagnostics is not None:
+                    diagnostics.append({"candidate_index": index, "errors": errors})
+                continue
             try:
                 kind = candidate["kind"]
-                evidence = candidate["evidence"]
-                if kind not in {"user_stated", "inferred", "answer_note"} or not 0 <= candidate["confidence"] <= 1:
-                    continue
-                if kind == "answer_note":
-                    reply = user_turns[-1].get("assistant_reply", "")
-                    personal_claim = re.compile(
-                        r"\b(?:you\s+(?:are|have|use|live|prefer|work|own|like)|"
-                        r"the user\s+(?:is|has|uses|lives|prefers|works|owns|likes))\b", re.I)
-                    note_text = candidate["statement"] + " " + " ".join(e.get("quote", "") for e in evidence)
-                    if (not reply or candidate["confidence"] < .7 or not evidence
-                            or personal_claim.search(note_text)
-                            or any(e["turn_id"] != newest or not e["quote"] or e["quote"] not in reply for e in evidence)
-                            or not re.fullmatch(r"[a-zA-Z0-9_.:-]{3,120}", candidate["fact_key"])
-                            or any(record["kind"] == "answer_note" for record in saved)):
-                        continue
-                    record = self.save(candidate["statement"], kind,
-                        [dict(e, role="assistant") for e in evidence], workspace,
-                        key=candidate["fact_key"], confidence=candidate["confidence"], before_commit=before_commit,
-                        sources=sources, user_prompt=lookup[newest], observed_at=observed_at)
-                    if record:
-                        saved.append(record)
-                    continue
-                if not any(e["turn_id"] == newest for e in evidence):
-                    continue
-                if any(e["turn_id"] not in lookup or not e["quote"] or
-                       e["quote"] not in lookup[e["turn_id"]] for e in evidence):
-                    continue
-                if kind == "user_stated" and candidate["confidence"] < .9:
-                    continue
-                if kind == "inferred" and candidate["confidence"] < .7:
-                    continue
-                if not re.fullmatch(r"[a-zA-Z0-9_.:-]{3,120}", candidate["fact_key"]):
-                    continue
-                # Quoted documents/code are not an automatic-memory source.
-                if any("```" in lookup[e["turn_id"]] or lookup[e["turn_id"]].lstrip().startswith(">") for e in evidence):
-                    continue
                 key = candidate["fact_key"]
-                canonical = fact_key(candidate["statement"])
-                if kind == "user_stated" and not canonical.startswith("statement."):
-                    key = canonical
-                record = self.save(candidate["statement"], kind, evidence, workspace,
-                                   key=key, confidence=candidate["confidence"],
-                                   before_commit=before_commit)
+                evidence = candidate["evidence"]
+                extra = {}
+                if kind == "answer_note":
+                    evidence = [dict(item, role="assistant") for item in evidence]
+                    extra = {"sources": sources, "user_prompt": user_turns[-1]["content"], "observed_at": observed_at}
+                else:
+                    canonical = fact_key(candidate["statement"])
+                    if kind == "user_stated" and not canonical.startswith("statement."):
+                        key = canonical
+                record = self.save(candidate["statement"], kind, evidence, workspace, key=key,
+                    confidence=candidate["confidence"], before_commit=before_commit, **extra)
                 if record:
                     saved.append(record)
+                elif diagnostics is not None:
+                    diagnostics.append({"candidate_index": index,
+                        "errors": [{"field": "save", "reason": "commit_cancelled"}]})
             except (KeyError, ValueError, TypeError):
-                continue
+                if diagnostics is not None:
+                    diagnostics.append({"candidate_index": index,
+                        "errors": [{"field": "save", "reason": "storage_validation_failed"}]})
         return saved
 
     def retrieve(self, query, workspace, limit=5):
@@ -305,8 +289,8 @@ class MemoryStore:
 
     def update_statement(self, ident, statement, *, instruction, turn_id, expected_updated_at, sources=None):
         statement = statement.strip()
-        if not statement or len(statement) > 1000:
-            raise ValueError("Memory statements must contain 1–1000 characters")
+        if not statement:
+            raise ValueError("Memory statement cannot be empty")
         if contains_secret(statement) or contains_secret(instruction) or "[REDACTED]" in statement:
             raise ValueError("Credentials and secrets cannot be saved as memories")
         with self._lock:
@@ -315,6 +299,9 @@ class MemoryStore:
                 raise ValueError("Active memory not found")
             if record["updated_at"] != expected_updated_at:
                 raise ValueError("Memory changed during this edit; read it again before updating")
+            limit = EXPLICIT_STATEMENT_LIMIT if record["kind"] == "explicit" else AUTOMATIC_STATEMENT_LIMIT
+            if len(statement) > limit:
+                raise ValueError(f"Memory statements must contain 1–{limit:,} characters (received {len(statement):,})")
         vector = self.embed(statement)
         with self._lock:
             current = self.find(record["id"])

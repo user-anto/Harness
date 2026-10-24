@@ -68,5 +68,12 @@ def test_stale_edits_and_secrets_cannot_overwrite_memory(settings):
             memory.update_statement(old['id'], 'password: SuperSecret123', instruction='Fix it', turn_id='u1',
                                     expected_updated_at=old['updated_at'])
         assert memory.find(old['id'])['statement'] == 'A fact'
+        long_note = ("Explicit research notes preserve uncertainty and supporting detail.\n" * 25).strip()
+        updated = memory.update_statement(old['id'], long_note, instruction='Expand the note', turn_id='u2',
+                                          expected_updated_at=old['updated_at'])
+        assert updated['statement'] == long_note and updated['id'] == old['id']
+        with pytest.raises(ValueError, match='16,000'):
+            memory.update_statement(old['id'], 'x' * 16001, instruction='Too long', turn_id='u3',
+                                    expected_updated_at=updated['updated_at'])
     finally:
         memory.close()

@@ -14,14 +14,21 @@ def evidence(turn="u1", quote="I prefer concise answers"):
 def test_explicit_persists_independent_of_logs(settings):
     path = settings.state_dir / "memory"
     store = MemoryStore(path, embed)
-    saved = store.save("I prefer concise answers", "explicit", evidence(), "project-a")
+    statement = ("A possible exoplanet candidate needs further observations before confirmation.\n" * 25).strip()
+    saved = store.save(statement, "explicit", evidence(quote=statement), "project-a")
     store.close()
     store = MemoryStore(path, embed)
     try:
-        retrieved = store.retrieve("concise answers", "project-b")
+        retrieved = store.retrieve("exoplanet candidate confirmation", "project-b")
         assert retrieved[0]["id"] == saved["id"]
         assert retrieved[0]["workspace"] == "project-a"
+        assert store.find(saved["id"])["statement"] == statement
+        assert store.find(saved["id"])["evidence"][0]["quote"] == statement
         assert not retrieved[0]["tentative"]
+        with pytest.raises(ValueError, match="16,000"):
+            store.save("x" * 16001, "explicit", evidence(), "project-a")
+        with pytest.raises(ValueError, match="1,000"):
+            store.save(statement, "user_stated", evidence(quote=statement), "project-a")
     finally:
         store.close()
 

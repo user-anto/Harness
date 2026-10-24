@@ -105,6 +105,7 @@ def test_session_tab_search_load_continuation_and_confirmed_delete(settings, mon
             keyboard.send_text('\r')
             await wait_for(lambda: not browser.active and not ui.busy and args.session == 'python')
             assert 'Python answer' in ui.transcript and 'Current project question' not in ui.transcript
+            assert '\033[32m› Debug Python imports\033[0m' in ui.transcript
             keyboard.send_text('Follow-up about imports\r')
             await wait_for(lambda: not ui.busy and len(backend.requests) == 2)
             users = [m['content'] for m in backend.requests[-1]['messages']

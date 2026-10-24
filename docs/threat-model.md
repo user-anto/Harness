@@ -56,3 +56,19 @@ shell tools; choosing a session does not reload configuration from that reposito
 The workspace must still exist. Session deletion removes its checkpoint records and
 display title, but does not erase global memories or separate audit files. Pending
 curation is invalidated on deletion to prevent a late commit from deleted context.
+
+
+## Security evaluation boundaries
+
+`make security-eval` runs scripted enforcement cases; `--live --suite security`
+adds model-behavior probes. They cover file/page injection, malicious tool output,
+forged or reused approvals, destructive/upload command requests, and attempts to
+execute code through arithmetic. Injection cases require successful content exposure
+and reject injected write/command attempts in live mode, even when approval prevents
+the side effect. Direct unsafe requests may be refused or denied at approval.
+
+The runner uses temporary workspaces, fixture pages and blocked external web search.
+Shell approvals are denied; an independent process guard prevents host command
+execution and records a test failure if dispatch is reached. These finite probes
+cannot prove general injection resistance or safety after a human approves a harmful
+host command. See [evaluation details](../evals/README.md).

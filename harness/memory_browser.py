@@ -16,34 +16,23 @@ from .memory_view import LABELS, age, safe_text
 
 
 class MemoryCards(CardControl):
-    def fragments(self):
-        browser = self.browser
-        self.line_indices = []
-        fragments = []
-        if not browser.matches:
-            self.cursor_row = 0
-            return [("class:muted", "\n  No memories match. Try different keywords.\n")]
-        for index, record in enumerate(browser.matches):
-            label, color = LABELS.get(record.get('kind'), LABELS['user_stated'])
-            selected = index == browser.index
-            if selected:
-                self.cursor_row = len(self.line_indices)
-            title = f" {'>' if selected else ' '} {label} | {record['id'][:8]} "
-            inner = self.width - 4
-            lines = ['╭' + title[:self.width - 2].ljust(self.width - 2, '─') + '╮']
-            for line in textwrap.wrap(safe_text(record['statement']), inner)[:3] or ['']:
-                lines.append('│ ' + line.ljust(inner) + ' │')
-            metadata = age(record.get('updated_at'))
-            lines.append('│ ' + safe_text(metadata)[:inner].ljust(inner) + ' │')
-            lines.extend(['╰' + '─' * (self.width - 2) + '╯', ''])
-            style = 'class:memory-selected' if selected else ''
-            for number, line in enumerate(lines):
-                if browser.ui.color and not selected and number in (0, len(lines) - 2):
-                    fragments.extend(to_formatted_text(ANSI(f'\033[{color}m{line}\033[0m\n')))
-                else:
-                    fragments.append((style, line + '\n'))
-                self.line_indices.append(index)
-        return fragments
+    def render_card(self, record, selected):
+        label, color = LABELS.get(record.get('kind'), LABELS['user_stated'])
+        title = f" {'>' if selected else ' '} {label} | {record['id'][:8]} "
+        inner = self.width - 4
+        lines = ['╭' + title[:self.width - 2].ljust(self.width - 2, '─') + '╮']
+        for line in textwrap.wrap(safe_text(record['statement']), inner)[:3] or ['']:
+            lines.append('│ ' + line.ljust(inner) + ' │')
+        metadata = age(record.get('updated_at'))
+        lines.append('│ ' + safe_text(metadata)[:inner].ljust(inner) + ' │')
+        lines.extend(['╰' + '─' * (self.width - 2) + '╯', ''])
+        result = []
+        for number, line in enumerate(lines):
+            if self.browser.ui.color and not selected and number in (0, len(lines) - 2):
+                result.append(list(to_formatted_text(ANSI(f'\033[{color}m{line}\033[0m'))))
+            else:
+                result.append([('class:memory-selected' if selected else '', line)])
+        return result
 
 
 class MemoryBrowser:
@@ -51,6 +40,7 @@ class MemoryBrowser:
         self.ui = ui
         self.active = False
         self.records = []
+        self._search_text = {}
         self.matches = []
         self.index = 0
         self.actions = queue.Queue()
@@ -90,13 +80,14 @@ class MemoryBrowser:
     def set_records(self, records):
         selected_id = self.selected['id'] if self.selected else None
         self.records = sorted(records, key=lambda item: (item.get('updated_at', ''), item['id']), reverse=True)
+        self._search_text = {record["id"]: json.dumps(record, ensure_ascii=False).casefold() for record in self.records}
         self.filter(selected_id)
 
     def filter(self, selected_id=None):
         selected_id = selected_id or (self.selected['id'] if self.selected else None)
         words = self.search.text.casefold().split()
         self.matches = [record for record in self.records
-                        if all(word in json.dumps(record, ensure_ascii=False).casefold() for word in words)]
+                        if all(word in self._search_text[record["id"]] for word in words)]
         identifiers = [record['id'] for record in self.matches]
         self.index = identifiers.index(selected_id) if selected_id in identifiers else min(self.index, max(0, len(identifiers) - 1))
         self.show_details()

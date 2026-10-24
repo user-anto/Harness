@@ -15,7 +15,7 @@ implementation. Console commands are declared in `pyproject.toml`:
 | Presentation | `tui`, `ui`, `browser`, `memory_browser`, `session_browser`, `memory_view` | Chat/approval output, shared card navigation and browser views |
 | Sessions | `runtime`, `sessions` | LangGraph/checkpoints, loading/deletion, metadata and first-prompt titles |
 | Context | `context`, `prompts` | Whole-turn budgeting, task record, memory trust and extraction instructions |
-| Memory | `memory`, `curation` | Qdrant records, evidence validation, in-place edits and background queue |
+| Memory | `memory`, `memory_policy`, `curation` | Qdrant records, shared evidence validation, rejection diagnostics, answer-note recovery and background queue |
 | Models | `backend` | llama.cpp requests, full-template token counts and owned-server lifecycle |
 | Tools | `tools`, `web` | Workspace/host/memory tools, approvals and bounded public HTTP fetches |
 | Boundaries | `security`, `credentials`, `audit` | Path/secret policies, allowlisted credential lookup and redacted metadata |
@@ -33,6 +33,7 @@ make install
 make lint
 make test
 make benchmark
+make security-eval
 make build
 ```
 
@@ -47,8 +48,10 @@ Real local Qdrant and SQLite are exercised. See [test coverage](../tests/README.
 and [evaluation modes](../evals/README.md).
 
 `make eval` is a separate, opt-in local-model run. It is not a CI prerequisite.
-The live runner disables host shell execution; offline fixtures may exercise bounded
-host commands in temporary workspaces. Neither an offline pass nor an optional
+Live contract runs disable shell execution. Security runs exercise denied shell
+approvals behind a separate process-dispatch guard, use fixture web pages, and report
+injected tool attempts as live behavior failures. `make benchmark` includes both
+suites; `make security-eval` selects only security cases. Neither an offline pass nor an optional
 model judge proves general intelligence or prompt-injection resistance.
 
 ## GitHub Actions workflow
@@ -65,7 +68,7 @@ verification on an Ubuntu runner, separately for Python 3.12 and 3.13.
 | Install | Install `.[dev]` with `requirements.lock` constraints | Reproduce tested dependency versions |
 | Lint | Run Ruff on application, tests and runner | Catch undefined names, unused imports and syntax issues |
 | Offline tests | Run the complete pytest suite | Check boundaries, persistence and keyboard behavior without models |
-| Offline benchmark | Run scripted contracts, three repetitions per case | Check complete orchestration outcomes and preserve reports |
+| Offline benchmark | Run scripted contracts, three repetitions per case | Check orchestration and security outcomes, streaming TTFT and repeat success-rate metrics |
 | Build | Produce wheel and source distribution | Verify packaging metadata and included resources |
 | Installed wheel smoke | Install wheel into a fresh environment, change to `/tmp`, run both entry points and check resources/dependencies | Catch imports that work only from the checkout and missing package data |
 | Upload reports | Save JSON reports separately for each Python version, even after earlier failure when available | Make traces and failures inspectable |

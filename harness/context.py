@@ -1,6 +1,8 @@
 """Bounded request assembly with complete conversation/tool groups."""
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 from typing import Callable
@@ -77,6 +79,7 @@ class ContextAssembler:
     def __init__(self, settings, count_tokens: Callable[[dict], int]):
         self.settings = settings
         self.count_tokens = count_tokens
+        self._segment_counts = OrderedDict()
 
     def assemble(self, *, system: str, messages: list[dict], tools=None,
                  task=None, summary="", memories=None) -> ContextPacket:
@@ -134,10 +137,19 @@ class ContextAssembler:
                 "Read smaller file/artifact ranges, shorten the request, or choose a larger supported context.")
 
         retained = [m for group in selected for m in group]
-        segments = [{"id": m.get("_id", f"message-{i}"), "kind": m["role"],
-                     "tokens": self.count_tokens({"model": Path(self.settings.model).name,
-                         "messages": [{"role": "user", "content": json.dumps(wire_message(m))}]})}
-                    for i, m in enumerate(retained)]
+        segments = []
+        model = Path(self.settings.model).name
+        for i, message in enumerate(retained):
+            content = json.dumps(wire_message(message))
+            key = hashlib.sha256((model + "\0" + content).encode()).digest()
+            if key not in self._segment_counts:
+                self._segment_counts[key] = self.count_tokens({"model": model,
+                    "messages": [{"role": "user", "content": content}]})
+                if len(self._segment_counts) > 512:
+                    self._segment_counts.popitem(last=False)
+            self._segment_counts.move_to_end(key)
+            segments.append({"id": message.get("_id", f"message-{i}"), "kind": message["role"],
+                             "tokens": self._segment_counts[key]})
         for group in removed:
             omitted.extend({"kind": "turn", "id": m.get("_id"), "reason": "summarized"} for m in group)
         manifest = {"input_tokens": tokens, "budget": self.settings.input_budget,

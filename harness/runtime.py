@@ -23,7 +23,8 @@ from .context import ContextAssembler, TaskRecord
 from .curation import eligible_turn, source_references
 from .credentials import ollama_api_key
 from .memory_view import render_memories
-from .prompts import EXTRACTION_PROMPT, MEMORY_SCHEMA, system_prompt
+from .prompts import EXTRACTION_PROMPT, MEMORY_SCHEMA, ANSWER_NOTE_RECOVERY_PROMPT, NOTE_RECOVERY_SCHEMA, system_prompt
+from .memory_policy import answer_note_expected, note_excerpts, resolve_note_candidate
 from .security import redact
 from .tools import ToolRegistry, terminal_approval
 
@@ -43,8 +44,9 @@ class State(TypedDict, total=False):
 
 class AgentRuntime:
     def __init__(self, settings, backend, *, memory=None, approve=terminal_approval,
-                 tools=None, on_text=None, on_status=None, on_answer=None, curator=None, max_steps=12):
+                 tools=None, on_text=None, on_status=None, on_answer=None, curator=None, max_steps=12, check_cancelled=None):
         self.settings, self.backend = settings, backend
+        self.check_cancelled = check_cancelled or (lambda: None)
         self.memory = memory if settings.memory_enabled else None
         self.on_text, self.max_steps = on_text, max_steps
         self.on_status = on_status or (lambda event: None)
@@ -167,6 +169,7 @@ class AgentRuntime:
         self.conn.commit()
 
     def _model(self, state):
+        self.check_cancelled()
         if state.get("iterations", 0) >= self.max_steps:
             return {"messages": state["messages"] + [{"role": "assistant", "content":
                     "Tool-step limit reached. Review the results before continuing.", "_id": str(uuid.uuid4())}]}
@@ -181,6 +184,7 @@ class AgentRuntime:
                     memories=state.get("memories", []))
         packet.manifest["assembly_seconds"] = time.perf_counter() - started
         self.audit.log("context", packet.manifest)
+        self.check_cancelled()
         response, usage = self.backend.complete(packet.request, on_text=self.on_text)
         self.on_status("response_end")
         response = redact(response)
@@ -197,6 +201,7 @@ class AgentRuntime:
         messages = list(state["messages"])
         task = deepcopy(state.get("task") or asdict(TaskRecord()))
         for call in messages[-1]["tool_calls"]:
+            self.check_cancelled()
             name = call["function"]["name"]
             try:
                 args = json.loads(call["function"]["arguments"])
@@ -272,6 +277,8 @@ class AgentRuntime:
             chat_template_kwargs={"enable_thinking": False}, reasoning_effort="none", temperature=0,
         )
         previous_cap = 0
+        note_only = False
+        excerpts = []
         for attempt, requested_cap in enumerate((512, 1024), start=1):
             cap = min(self.settings.output_tokens, requested_cap)
             if cap == previous_cap:
@@ -289,17 +296,45 @@ class AgentRuntime:
                     raise ValueError("Extractor reached its output limit")
                 data = json.loads(response["content"])
                 if (not isinstance(data, dict) or set(data) != {"candidates"}
-                        or not isinstance(data["candidates"], list) or len(data["candidates"]) > 5
+                        or not isinstance(data["candidates"], list) or len(data["candidates"]) > (1 if note_only else 5)
                         or any(not isinstance(item, dict) for item in data["candidates"])):
                     raise ValueError("Extractor returned an invalid candidates object")
             except (ValueError, TypeError, KeyError):
                 self.audit.log("memory_extraction_invalid", {"attempt": attempt,
                                "finish_reason": response.get("_finish_reason"), "output_cap": cap})
                 continue
-            # Exact user evidence, confidence and secret checks still run in MemoryStore.
-            saved = self.memory.save_candidates(data["candidates"], turns[-8:], str(self.settings.workspace),
-                                                sources=source_references(self.last_trace))
+            diagnostics = []
+            candidates = data["candidates"]
+            if note_only:
+                candidates = []
+                for index, selection in enumerate(data["candidates"]):
+                    candidate, errors = resolve_note_candidate(selection, turns[-1], excerpts)
+                    if errors:
+                        diagnostics.append({"candidate_index": index, "errors": errors})
+                    else:
+                        candidates.append(candidate)
+            saved = self.memory.save_candidates(candidates, turns[-8:], str(self.settings.workspace),
+                sources=source_references(self.last_trace), diagnostics=diagnostics)
+            for rejection in diagnostics:
+                self.audit.log("memory_candidate_rejected", {"turn_id": user_id, "attempt": attempt, **rejection})
+            self.audit.log("memory_selection", {"turn_id": user_id, "candidate_count": len(candidates),
+                "accepted_count": len(saved), "rejected_count": len(diagnostics),
+                "outcome": "empty_candidates" if not candidates else "accepted" if saved else "all_rejected"})
             self.audit.log("memory_write", {"ids": [record["id"] for record in saved]})
+            if answer_note_expected(turns) and not any(r["kind"] == "answer_note" for r in saved):
+                if attempt == 1:
+                    note_only = True
+                    packet.request["messages"][0]["content"] = ANSWER_NOTE_RECOVERY_PROMPT
+                    excerpts = note_excerpts(turns[-1].get("assistant_reply", ""))
+                    supplied = deepcopy(turns[-8:])
+                    supplied[-1]["answer_excerpts"] = excerpts
+                    packet.request["messages"][-1]["content"] = json.dumps(supplied)
+                    schema = deepcopy(NOTE_RECOVERY_SCHEMA)
+                    schema["properties"]["candidates"]["items"]["properties"]["evidence_id"]["enum"] = [e["id"] for e in excerpts]
+                    packet.request["response_format"]["schema"] = schema
+                    self.audit.log("memory_note_retry", {"turn_id": user_id, "synchronous": True})
+                    continue
+                raise ValueError("Research answer note was not saved; see memory selection and rejection diagnostics")
             return
         raise ValueError("Extractor did not return complete valid JSON; no new memories were saved")
 

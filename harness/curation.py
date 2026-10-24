@@ -3,6 +3,7 @@
 from collections import OrderedDict
 from copy import deepcopy
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 import os
 import re
@@ -16,22 +17,13 @@ import httpx
 
 from .config import private_dir
 from .memory import fact_key
-from .prompts import EXTRACTION_PROMPT, MEMORY_SCHEMA
+from .prompts import EXTRACTION_PROMPT, MEMORY_SCHEMA, ANSWER_NOTE_RECOVERY_PROMPT, NOTE_RECOVERY_SCHEMA
+from .memory_policy import candidate_field_errors, answer_note_expected, note_excerpts, resolve_note_candidate
 from .security import contains_secret, redact
 
 
 def valid_candidate(candidate):
-    if not isinstance(candidate, dict) or set(candidate) != set(MEMORY_SCHEMA["properties"]["candidates"]["items"]["required"]):
-        return False
-    if (not isinstance(candidate["statement"], str) or not 1 <= len(candidate["statement"]) <= 1000
-            or not isinstance(candidate["fact_key"], str) or not re.fullmatch(r"[a-zA-Z0-9_.:-]{3,120}", candidate["fact_key"])
-            or candidate["kind"] not in ("user_stated", "inferred", "answer_note")
-            or type(candidate["confidence"]) not in (int, float) or not 0 <= candidate["confidence"] <= 1
-            or not isinstance(candidate["evidence"], list) or not 1 <= len(candidate["evidence"]) <= 8):
-        return False
-    return all(isinstance(item, dict) and set(item) == {"turn_id", "quote"}
-               and all(isinstance(item[key], str) and item[key] for key in ("turn_id", "quote"))
-               and len(item["quote"]) <= 1000 for item in candidate["evidence"])
+    return not candidate_field_errors(candidate)
 
 
 def source_references(trace):
@@ -123,12 +115,61 @@ class OllamaExtractor:
         self.client = client or httpx.Client(base_url=settings.memory_server_url,
             timeout=httpx.Timeout(settings.memory_timeout, connect=5), trust_env=False)
         self._model_checked = False
+        self._fallback = None
+        self._local_only = False
+        self._retry_primary_at = 0.0
+        self.last_model = None
         self.cloud = settings.memory_model.endswith("-cloud") or settings.memory_model.endswith(":cloud")
 
     def close(self):
         self.client.close()
 
-    def extract(self, turns, stopped, audit=None):
+    def extract(self, turns, stopped, audit=None, *, note_only=False, feedback=()):
+        # No network request or fallback for greetings, excluded turns, or stale jobs.
+        if stopped() or not extraction_turns(turns):
+            return [], []
+        fallback_model = self.settings.memory_fallback_model
+        use_fallback = bool(self.cloud and fallback_model and fallback_model != self.settings.memory_model)
+        if not use_fallback or time.monotonic() >= self._retry_primary_at:
+            try:
+                result = self._extract(turns, stopped, audit, note_only=note_only, feedback=feedback)
+                self.last_model = self.settings.memory_model
+                self._retry_primary_at = 0.0
+                return result
+            except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+                if stopped():
+                    return [], []
+                # Metadata can identify a remote model whose alias lacks a cloud suffix.
+                if not (self.cloud and fallback_model and fallback_model != self.settings.memory_model):
+                    raise
+                self._retry_primary_at = time.monotonic() + self.settings.memory_cloud_retry_interval
+                if audit:
+                    audit.log("memory_fallback", {"primary_model": self.settings.memory_model,
+                        "fallback_model": fallback_model, "reason": type(exc).__name__,
+                        "phase": "answer_note_recovery" if note_only else "extraction",
+                        "retry_primary_after_seconds": self.settings.memory_cloud_retry_interval})
+        if stopped():
+            return [], []
+        if self._fallback is None:
+            local = replace(self.settings, memory_model=fallback_model, memory_fallback_model="")
+            self._fallback = OllamaExtractor(local, client=self.client)
+            self._fallback._local_only = True
+        try:
+            result = self._fallback._extract(turns, stopped, audit, note_only=note_only, feedback=feedback)
+            self.last_model = fallback_model
+            return result
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError) as exc:
+            if stopped():
+                return [], []
+            message = f"Cloud curation unavailable; local fallback {fallback_model} failed: {exc}"
+            if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                raise TimeoutError(message) from exc
+            raise ValueError(message) from exc
+
+    def recover_note(self, turns, stopped, audit=None, *, feedback=()):
+        return self.extract(turns, stopped, audit, note_only=True, feedback=feedback)
+
+    def _extract(self, turns, stopped, audit=None, *, note_only=False, feedback=()):
         turns = extraction_turns(turns)
         if not turns:
             return [], []
@@ -140,6 +181,8 @@ class OllamaExtractor:
             metadata = info.json()
             self.cloud = self.cloud or bool(metadata.get("remote_host") or metadata.get("remote_model"))
             self._model_checked = True
+        if self._local_only and self.cloud:
+            raise ValueError("The fallback model resolves to a cloud model; pull a local fallback model")
         instructions = (EXTRACTION_PROMPT + "\nEach object's content is a USER turn; its id is an opaque identifier. "
             "An optional assistant_reply field is the final assistant answer for that user turn, supplied only as context. "
             "Only answer_note candidates may quote assistant_reply; never turn assistant guesses into user facts. "
@@ -149,16 +192,28 @@ class OllamaExtractor:
             "Statements such as 'I live in Pune' and 'I prefer concise answers' are durable direct facts, "
             "not one-off tasks. Include clear direct facts as user_stated candidates. "
             "A greeting alone has no durable facts.\nUse this JSON schema:\n")
+        if note_only:
+            instructions = (ANSWER_NOTE_RECOVERY_PROMPT +
+                "\nEach object's content is a user turn; assistant_reply is its final answer. "
+                "answer_excerpts contains allowed evidence IDs and exact source slices. "
+                "Use this JSON schema:\nPrior rejection codes: " + ", ".join(feedback)[:200] + "\n")
         # Ollama does not expose a preflight tokenizer for this adapter. Use a small
         # UTF-8 byte ceiling plus template margin, never the main model's tokenizer.
-        budget = self.settings.memory_context - 1024 - 1024
+        budget = self.settings.memory_context - 1024 - 1024 - 384
         omitted = []
         while True:
-            schema = deepcopy(MEMORY_SCHEMA)
-            evidence_schema = schema["properties"]["candidates"]["items"]["properties"]["evidence"]["items"]
-            evidence_schema["properties"]["turn_id"]["enum"] = [turn["id"] for turn in turns]
+            schema = deepcopy(NOTE_RECOVERY_SCHEMA if note_only else MEMORY_SCHEMA)
+            supplied = deepcopy(turns)
+            excerpts = []
+            if note_only:
+                excerpts = note_excerpts(turns[-1].get("assistant_reply", ""))
+                supplied[-1]["answer_excerpts"] = excerpts
+                schema["properties"]["candidates"]["items"]["properties"]["evidence_id"]["enum"] = [e["id"] for e in excerpts]
+            else:
+                evidence_schema = schema["properties"]["candidates"]["items"]["properties"]["evidence"]["items"]
+                evidence_schema["properties"]["turn_id"]["enum"] = [turn["id"] for turn in turns]
             system = instructions + json.dumps(schema)
-            content = json.dumps(turns, ensure_ascii=False)
+            content = json.dumps(supplied, ensure_ascii=False)
             size = len((system + content).encode("utf-8"))
             if size <= budget:
                 break
@@ -172,18 +227,28 @@ class OllamaExtractor:
             else:
                 raise ValueError("Curation prompt exceeds its separate context budget")
         deadline = time.monotonic() + self.settings.memory_timeout
-        for cap in (512, 1024):
+        failure = "unknown"
+        previous_fields = ""
+        caps = (1024,) if note_only else (512, 1024)
+        for attempt, cap in enumerate(caps, 1):
+            field_failures = []
             if stopped():
                 return [], turns
             if audit:
-                audit.log("memory_context", {"model": self.settings.memory_model,
+                audit.log("memory_context", {"model": self.settings.memory_model, "turn_id": turns[-1]["id"],
                     "budget_kind": "utf8-byte-ceiling-with-template-margin", "prompt_bytes": size,
                     "byte_ceiling": budget, "context": self.settings.memory_context,
                     "output_cap": cap, "omitted_turn_ids": omitted, "cloud": self.cloud,
+                    "phase": "answer_note_recovery" if note_only else "extraction",
                     "assistant_reply_chars": len(turns[-1].get("assistant_reply", "")),
                     "keep_alive": self.settings.memory_keep_alive})
+            retry = ("" if attempt == 1 else
+                "\nPrevious response failed validation: " + failure + previous_fields +
+                ". Return exactly one complete JSON object with candidates. At most ONE candidate; "
+                "keep statement under 300 characters and evidence quotes under 200 characters. "
+                "Copy exact turn IDs and quotes. No prose or Markdown. Do not invent missing evidence.")
             request = {"model": self.settings.memory_model, "messages": [
-                {"role": "system", "content": system}, {"role": "user", "content": content}],
+                {"role": "system", "content": system + retry}, {"role": "user", "content": content}],
                 "stream": True, "keep_alive": self.settings.memory_keep_alive,
                 "options": {"num_predict": cap, "temperature": 0}}
             if self.cloud:
@@ -212,7 +277,7 @@ class OllamaExtractor:
                         raise ValueError("Curation response exceeded its size limit")
                     chunks.append(text)
             if audit:
-                audit.log("memory_generation", {"model": self.settings.memory_model,
+                audit.log("memory_generation", {"model": self.settings.memory_model, "turn_id": turns[-1]["id"],
                     "prompt_tokens": result.get("prompt_eval_count"), "output_tokens": result.get("eval_count"),
                     "finish_reason": result.get("done_reason"), "cloud": self.cloud,
                     "load_duration_ns": result.get("load_duration"),
@@ -220,16 +285,55 @@ class OllamaExtractor:
                     "eval_duration_ns": result.get("eval_duration"),
                     "total_duration_ns": result.get("total_duration")})
             try:
-                if not result.get("done") or result.get("done_reason") == "length":
-                    continue
-                data = json.loads("".join(chunks))
-                if (isinstance(data, dict) and set(data) == {"candidates"}
-                        and isinstance(data["candidates"], list) and len(data["candidates"]) <= 5
-                        and all(valid_candidate(candidate) for candidate in data["candidates"])):
-                    return data["candidates"], turns
+                if not result.get("done"):
+                    failure = "incomplete_stream"
+                elif result.get("done_reason") == "length":
+                    failure = "output_limit"
+                else:
+                    raw = "".join(chunks).strip()
+                    fenced = re.fullmatch(r"```(?:json)?\s*\n([\s\S]*?)\n```", raw, re.I)
+                    if fenced:
+                        raw = fenced[1]
+                    data = json.loads(raw)
+                    if not isinstance(data, dict) or set(data) != {"candidates"}:
+                        failure = "invalid_envelope"
+                    elif not isinstance(data["candidates"], list) or len(data["candidates"]) > (1 if note_only else 5):
+                        failure = "invalid_candidates_list"
+                    elif note_only:
+                        accepted = []
+                        for index, selection in enumerate(data["candidates"]):
+                            candidate, errors = resolve_note_candidate(selection, turns[-1], excerpts)
+                            if errors:
+                                field_failures.append({"candidate_index": index, "errors": errors})
+                            else:
+                                accepted.append(candidate)
+                        if accepted:
+                            return accepted[:1], turns
+                        failure = "answer_note_rejected" if field_failures else "missing_answer_note"
+                    elif not all(valid_candidate(candidate) for candidate in data["candidates"]):
+                        failure = "invalid_candidate_fields"
+                        field_failures = [{"candidate_index": index, "errors": candidate_field_errors(candidate)}
+                                          for index, candidate in enumerate(data["candidates"])
+                                          if not valid_candidate(candidate)]
+                    else:
+                        return data["candidates"], turns
+            except json.JSONDecodeError:
+                failure = "invalid_json"
             except (ValueError, TypeError):
-                pass
-        raise ValueError("Curation returned incomplete or invalid JSON; no new memories were saved")
+                failure = "invalid_response"
+            previous_fields = " (" + ", ".join(sorted({error["field"] for item in field_failures
+                for error in item["errors"]}))[:80] + ")" if field_failures else ""
+            if audit:
+                audit.log("memory_extraction_invalid", {"attempt": attempt, "output_cap": cap,
+                    "reason": failure, "candidate_errors": field_failures, "model": self.settings.memory_model,
+                    "turn_id": turns[-1]["id"],
+                    "phase": "answer_note_recovery" if note_only else "extraction",
+                    "response_chars": length, "finish_reason": result.get("done_reason")})
+        if note_only:
+            raise ValueError("Answer-note recovery failed (" + failure + "); no answer note was saved")
+        raise ValueError("Curation failed validation after two attempts (" + failure +
+                         "); no new memories were saved")
+
 
 
 class MemoryCurator:
@@ -298,6 +402,57 @@ class MemoryCurator:
         with self._condition:
             return not self._stopped and epoch == self._epoch
 
+    def _save_result(self, job, epoch, candidates, turns, phase):
+        diagnostics = []
+        records = self.memory.save_candidates(candidates, turns, job["workspace"],
+            sources=job.get("sources", []),
+            observed_at=datetime.fromtimestamp(job["created"], timezone.utc).isoformat(),
+            before_commit=lambda: self._current(epoch), diagnostics=diagnostics)
+        if self.audit:
+            metadata = {"turn_id": job["id"], "phase": phase,
+                        "model": getattr(self.extractor, "last_model", None) or self.settings.memory_model}
+            for rejection in diagnostics:
+                self.audit.log("memory_candidate_rejected", {**metadata, **rejection})
+            self.audit.log("memory_selection", {**metadata, "candidate_count": len(candidates),
+                "accepted_count": len(records), "rejected_count": len(diagnostics),
+                "outcome": "empty_candidates" if not candidates else "accepted" if records else "all_rejected"})
+            self.audit.log("memory_write", {**metadata, "ids": [record["id"] for record in records], "background": True})
+        return records, diagnostics
+
+    def _curate(self, job, epoch):
+        def stopped():
+            return not self._current(epoch)
+        candidates, turns = self.extractor.extract(job["turns"], stopped, self.audit)
+        if stopped():
+            return
+        records, diagnostics = self._save_result(job, epoch, candidates, turns, "extraction")
+        if (stopped() or any(record["kind"] == "answer_note" for record in records)
+                or not answer_note_expected(job["turns"])):
+            return
+        feedback = sorted({error["reason"] for entry in diagnostics for error in entry["errors"]})
+        if not feedback:
+            feedback = ["missing_answer_note"]
+        if self.audit:
+            self.audit.log("memory_note_retry", {"turn_id": job["id"], "reasons": feedback,
+                "accepted_fact_count": len(records)})
+        recover = getattr(self.extractor, "recover_note", None)
+        if recover is None:
+            raise ValueError("Research answer note was not saved; the extractor does not support recovery")
+        try:
+            candidates, turns = recover(job["turns"], stopped, self.audit, feedback=feedback)
+            if stopped():
+                return
+            records, _ = self._save_result(job, epoch, candidates, turns, "answer_note_recovery")
+            if not any(record["kind"] == "answer_note" for record in records):
+                raise ValueError("No answer note passed evidence and acceptance checks")
+        except Exception as exc:
+            if stopped():
+                return
+            message = "Research answer note was not saved; other accepted memories remain: " + str(exc)
+            if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                raise TimeoutError(message) from exc
+            raise ValueError(message) from exc
+
     def _work(self):
         try:
             while True:
@@ -312,15 +467,7 @@ class MemoryCurator:
                     self._persist()
                 failed = False
                 try:
-                    candidates, turns = self.extractor.extract(job["turns"], lambda: not self._current(epoch), self.audit)
-                    if self._current(epoch):
-                        records = self.memory.save_candidates(candidates, turns, job["workspace"],
-                                                             sources=job.get("sources", []),
-                                                             observed_at=datetime.fromtimestamp(job["created"], timezone.utc).isoformat(),
-                                                             before_commit=lambda: self._current(epoch))
-                        if self.audit:
-                            self.audit.log("memory_write", {"ids": [record["id"] for record in records],
-                                           "model": self.settings.memory_model, "background": True})
+                    self._curate(job, epoch)
                 except Exception as exc:
                     failed = True
                     if self._current(epoch):

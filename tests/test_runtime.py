@@ -125,6 +125,11 @@ def test_explicit_memory_acknowledged_only_after_write_and_recalled_each_turn(se
         extraction_request = backend.requests[1]
         supplied = json.loads(extraction_request["messages"][-1]["content"])
         assert supplied[-1]["assistant_reply"] == "You prefer concise answers."
+        long_note = ("Unconfirmed research finding: further observations are needed.\n" * 25).strip()
+        previous_calls = len(backend.requests)
+        assert runtime.turn("/remember " + long_note).startswith("Remembered:")
+        saved = next(record for record in memory.records() if record["statement"] == long_note)
+        assert saved["evidence"][0]["quote"] == long_note and len(backend.requests) == previous_calls
     finally:
         runtime.close()
         memory.close()

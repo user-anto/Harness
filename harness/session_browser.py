@@ -13,31 +13,18 @@ from .memory_view import age, safe_text
 
 
 class SessionCards(CardControl):
-    def fragments(self):
-        browser = self.browser
-        self.line_indices = []
-        self.cursor_row = 0
-        fragments = []
-        if not browser.matches:
-            return [('class:muted', '\n  No saved sessions match. Try different keywords.\n')]
+    def render_card(self, record, selected):
         inner = max(1, self.width - 4)
-        for index, record in enumerate(browser.matches):
-            selected = index == browser.index
-            if selected:
-                self.cursor_row = len(self.line_indices)
-            current = ' · CURRENT' if record['id'] == browser.current else ''
-            title = f" {'>' if selected else ' '} SESSION{current} "
-            lines = ['╭' + title[:self.width - 2].ljust(self.width - 2, '─') + '╮']
-            content = textwrap.wrap(safe_text(record.get('name', 'UNKNOWN')), inner) or ['UNKNOWN']
-            content += [safe_text(record['id']),
-                        f"{age(record.get('updated_at'))} · {record['messages']} retained messages"]
-            lines += ['│ ' + line[:inner].ljust(inner) + ' │' for line in content]
-            lines += ['╰' + '─' * (self.width - 2) + '╯', '']
-            for number, line in enumerate(lines):
-                style = 'class:memory-selected' if selected else ('class:memory-heading' if number == 0 else '')
-                fragments.append((style, line + '\n'))
-                self.line_indices.append(index)
-        return fragments
+        current = ' · CURRENT' if record['id'] == self.browser.current else ''
+        title = f" {'>' if selected else ' '} SESSION{current} "
+        lines = ['╭' + title[:self.width - 2].ljust(self.width - 2, '─') + '╮']
+        content = textwrap.wrap(safe_text(record.get('name', 'UNKNOWN')), inner) or ['UNKNOWN']
+        content += [safe_text(record['id']),
+                    f"{age(record.get('updated_at'))} · {record['messages']} retained messages"]
+        lines += ['│ ' + line[:inner].ljust(inner) + ' │' for line in content]
+        lines += ['╰' + '─' * (self.width - 2) + '╯', '']
+        return [[('class:memory-selected' if selected else 'class:memory-heading' if number == 0 else '', line)]
+                for number, line in enumerate(lines)]
 
 
 class SessionBrowser:
