@@ -1,6 +1,7 @@
 include LICENSE README.md logo.png Makefile config.yaml requirements.lock
 include harness/banner.ansi
 recursive-include docs *.md
+exclude docs/technical-design.md
 recursive-include tests *.py *.md
 include evals/run_evals.py evals/benchmarks.json evals/security.json
 include evals/README.md

@@ -438,7 +438,7 @@ flowchart TD
 ```
 
 For the exact message layout, see [prompt structure](docs/prompt-structure.md).
-For implementation details, see the [technical design](docs/technical-design.md).
+For implementation details, see [architecture decisions](docs/architecture.md).
 
 ## Tests and evaluation
 
@@ -544,7 +544,6 @@ Harness/
 
 | Guide | What you will find |
 | --- | --- |
-| [Technical design](docs/technical-design.md) | Component internals, low-level design, execution paths, and diagrams. |
 | [Architecture decisions](docs/architecture.md) | System boundaries and design tradeoffs. |
 | [Prompt structure](docs/prompt-structure.md) | How the effective main-model request is assembled. |
 | [Memory policy](docs/memory-policy.md) | Acceptance rules, evidence, curation, and lifecycle. |
