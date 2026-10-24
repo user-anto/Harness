@@ -1,0 +1,45 @@
+name: checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install tested development dependencies
+        run: python -m pip install -c requirements.lock '.[dev]'
+      - name: Lint current source
+        run: python -m ruff check harness tests evals/run_evals.py
+      - name: Run offline system tests
+        run: python -m pytest
+      - name: Run offline orchestration contracts
+        run: python evals/run_evals.py --offline
+      - name: Build source distribution and wheel
+        run: python -m build
+      - name: Smoke test installed wheel outside the checkout
+        run: |
+          python -m venv /tmp/harness-wheel
+          /tmp/harness-wheel/bin/pip install -c requirements.lock dist/*.whl
+          cd /tmp
+          /tmp/harness-wheel/bin/python -I -m harness --help
+          /tmp/harness-wheel/bin/harness --version
+          /tmp/harness-wheel/bin/harness-set-model --help
+          /tmp/harness-wheel/bin/python -I -c 'from importlib.resources import files; from importlib.metadata import distribution; assert files("harness").joinpath("banner.ansi").is_file(); assert not any(str(p).startswith("src/") for p in distribution("Harness").files)'
+          /tmp/harness-wheel/bin/python -m pip check
+      - name: Upload contract reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contract-reports-${{ matrix.python-version }}
+          path: evals/reports/*.json

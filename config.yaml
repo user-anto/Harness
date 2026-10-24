@@ -1,11 +1,25 @@
-ctx-size: 128
-sliding_window_tokens: 96
-
-default_orch_model: "~/models/gemma-4/e4b-it.gguf"
-default_search_model: "llama3.2:3b"
-default_guard_model: "shieldgemma:2b"
-
-high_coding_model: "~/models/ornith/1-9b.gguf"
-xhigh_coding_model: "minimax-m3:cloud"
-
+# Example: harness --workspace /path/to/project --config /path/to/config.yaml
+model: "~/models/gemma-4/e4b-it.gguf"
+server_url: "http://127.0.0.1:8000"
+model_context: 131072
+input_cap: 32768
+output_tokens: 4096
+headroom: 0.10
 embedding_model: "mxbai-embed-large:latest"
+# Optional shared credential file; otherwise reads only OLLAMA_API_KEY from workspace .env.
+env_file: ""
+memory_enabled: true
+memory_background: true
+memory_model: "gpt-oss:20b-cloud"
+memory_keep_alive: "10m"
+memory_context: 8192
+# Used only if memory_model is changed to a local CPU model.
+memory_threads: 2
+memory_timeout: 120
+show_reasoning: true
+retention_days: 30
+command_timeout: 30
+output_limit: 16000
+server_timeout: 120
+# Let llama.cpp fit GPU offloading to available VRAM. Set 0 for CPU-only execution.
+gpu_layers: auto

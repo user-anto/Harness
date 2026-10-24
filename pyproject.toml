@@ -1,32 +1,51 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "Harness"
-version = "2.1.0"
-description = "Agentic CLI Framework"
-authors = [
-    {name = "Antareep"}
-]
+version = "3.0.0"
+description = "Local coding and research CLI with deliberate context and explicit approvals"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Antareep"}]
 requires-python = ">=3.12"
 dependencies = [
-    "beautifulsoup4>=4.12.0",
-    "httpx>=0.27.0",
-    "langchain-core>=0.2.0",
-    "langchain-ollama>=0.1.0",
-    "langgraph>=0.2.0",
-    "markdownify>=0.13.0",
-    "ollama>=0.3.0",
-    "openai>=1.0.0",
-    "Pillow>=10.0.0",
-    "pyfiglet>=1.0.2",
-    "python-dotenv>=1.0.0",
-    "pyyaml>=6.0",
-    "qdrant-client>=1.9.0",
-    "typing-extensions>=4.10.0",
+    "beautifulsoup4>=4.12,<5",
+    "httpx>=0.28,<1",
+    "langchain-core>=1.4.8,<2",
+    "langgraph>=1.2.6,<2",
+    "langgraph-checkpoint-sqlite>=3.1.2,<4",
+    "markdownify>=0.13,<2",
+    "ollama>=0.6,<1",
+    "prompt-toolkit>=3.0.52,<4",
+    "python-dotenv>=1.2,<2",
+    "pyyaml>=6,<7",
+    "qdrant-client>=1.19,<2",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "ruff>=0.14,<1", "build>=1.2,<2"]
+
+[project.scripts]
+harness = "harness.cli:main"
+harness-set-model = "harness.set_model:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src"]
+include = ["harness", "harness.*"]
+
+[tool.setuptools.package-data]
+harness = ["banner.ansi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
