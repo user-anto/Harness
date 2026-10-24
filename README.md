@@ -11,6 +11,9 @@ persists resumable sessions, and requires explicit approval for writes and host 
 **Approved shell commands run on your host, unsandboxed.** Workspace path checks apply
 to file/search tools; they do not contain an approved shell command. Review every command.
 
+For a detailed component-by-component explanation, algorithms, storage schemas and
+low-level design diagrams, read the [complete technical design](docs/technical-design.md).
+
 ## System architecture
 
 ```mermaid

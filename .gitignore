@@ -13,3 +13,4 @@ dist/
 evals/reports/
 *.sqlite
 *.sqlite-journal
+docs/technical-design.md
